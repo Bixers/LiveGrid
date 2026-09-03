@@ -83,6 +83,4 @@ pnpm desktop:pack
 
 桌面版使用 Electron 承载新界面，并复用提供程序中独立运行的本地服务二进制。由于没有原始 C# 工程和 Python 服务源码，旧外壳与后端没有被反编译重写；二次开发集中在可维护的 TypeScript 前端和新的桌面生命周期、静态资源服务及接口转发层。
 
-## 归属与许可
 
-界面中不再出现原产品名、原作者账户、会员等级或无关站点入口。第三方开源许可不属于可移除的产品归属；完整许可文本会随 `public/licenses/` 一起进入构建产物，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
