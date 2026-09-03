@@ -1,5 +1,5 @@
 const { app, BrowserWindow, Menu, shell } = require('electron');
-const { spawn } = require('node:child_process');
+const { execFile, spawn } = require('node:child_process');
 const fs = require('node:fs');
 const http = require('node:http');
 const path = require('node:path');
@@ -168,11 +168,57 @@ function backendHealthy() {
   });
 }
 
+function runCommand(file, args) {
+  return new Promise((resolve) => {
+    execFile(file, args, { windowsHide: true }, (error, stdout) => {
+      resolve({ ok: !error, stdout: String(stdout || '') });
+    });
+  });
+}
+
+async function findBackendListenerPid() {
+  const result = await runCommand('netstat.exe', ['-ano', '-p', 'tcp']);
+  if (!result.ok) return null;
+  for (const line of result.stdout.split(/\r?\n/)) {
+    const columns = line.trim().split(/\s+/);
+    if (columns.length < 5 || columns[0]?.toUpperCase() !== 'TCP') continue;
+    if (!columns[1]?.endsWith(`:${BACKEND_PORT}`) || columns[3]?.toUpperCase() !== 'LISTENING') continue;
+    const pid = Number(columns[4]);
+    if (Number.isInteger(pid) && pid > 0) return pid;
+  }
+  return null;
+}
+
+async function stopConflictingBackend() {
+  if (!await backendHealthy()) return true;
+  const pid = await findBackendListenerPid();
+  if (!pid) {
+    log('compatible service found on port 8123, but its process could not be identified');
+    return false;
+  }
+  log(`stopping stale backend process tree ${pid}`);
+  await runCommand('taskkill.exe', ['/PID', String(pid), '/T', '/F']);
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    if (!await backendHealthy()) return true;
+  }
+  log(`backend process ${pid} still owns port 8123`);
+  return false;
+}
+
 function prepareBackend() {
   const sourceDir = app.isPackaged
     ? path.join(process.resourcesPath, 'backend')
     : path.resolve(__dirname, '..', 'desktop-backend');
-  const runtimeDir = path.join(app.getPath('userData'), 'backend');
+  let runtimeDir = app.isPackaged
+    ? path.join(path.dirname(process.execPath), 'runtime', 'backend')
+    : path.join(app.getPath('userData'), 'backend');
+  try {
+    fs.mkdirSync(runtimeDir, { recursive: true });
+    fs.accessSync(runtimeDir, fs.constants.W_OK);
+  } catch {
+    runtimeDir = path.join(app.getPath('userData'), 'backend');
+  }
   fs.mkdirSync(runtimeDir, { recursive: true });
 
   for (const fileName of ['DouyuViewer.exe', 'dm_bridge.exe', 'dm_bridge.cs']) {
@@ -191,12 +237,14 @@ function prepareBackend() {
 }
 
 async function ensureBackend() {
-  if (await backendHealthy()) {
-    log('reusing compatible service on port 8123');
+  if (!await stopConflictingBackend()) {
+    log('cannot start the packaged backend while port 8123 remains occupied');
     return;
   }
 
   const runtimeDir = prepareBackend();
+  const pythonTempDir = path.resolve(runtimeDir, '..', 'pyi-temp');
+  fs.mkdirSync(pythonTempDir, { recursive: true });
   const executable = path.join(runtimeDir, 'DouyuViewer.exe');
   const backendLog = fs.openSync(path.join(runtimeDir, 'backend.log'), 'a');
   backendProcess = spawn(executable, ['server.py', '--no-browser'], {
@@ -204,6 +252,11 @@ async function ensureBackend() {
     detached: false,
     windowsHide: true,
     stdio: ['ignore', backendLog, backendLog],
+    env: {
+      ...process.env,
+      TEMP: pythonTempDir,
+      TMP: pythonTempDir,
+    },
   });
   fs.closeSync(backendLog);
   backendProcess.once('exit', (code) => {
@@ -291,7 +344,17 @@ function createWindow() {
 
 function stopOwnedBackend() {
   if (backendProcess && !backendProcess.killed) {
-    backendProcess.kill();
+    const pid = backendProcess.pid;
+    if (pid) {
+      const killer = spawn('taskkill.exe', ['/PID', String(pid), '/T', '/F'], {
+        detached: true,
+        windowsHide: true,
+        stdio: 'ignore',
+      });
+      killer.unref();
+    } else {
+      backendProcess.kill();
+    }
     backendProcess = null;
   }
 }

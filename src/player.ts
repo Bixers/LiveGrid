@@ -22,7 +22,12 @@ export class StreamPlayer {
   private hls: HlsEngine | null = null;
   private flv: FlvEngine | null = null;
   private currentUrl = '';
+  private pendingUrl = '';
+  private forceNextChange = false;
   private generation = 0;
+  private stallTimer: number | null = null;
+  private lastTime = 0;
+  private stalledTicks = 0;
   private readonly listeners: Array<[keyof HTMLMediaElementEventMap, EventListener]> = [];
 
   constructor(
@@ -30,10 +35,14 @@ export class StreamPlayer {
     private readonly onState: PlayerStateHandler,
   ) {
     this.bind('loadstart', () => this.onState('loading'));
-    this.bind('playing', () => this.onState('playing'));
+    this.bind('playing', () => {
+      this.stalledTicks = 0;
+      this.onState('playing');
+    });
     this.bind('waiting', () => this.onState('stalled', '正在等待数据'));
     this.bind('stalled', () => this.onState('stalled', '数据暂时中断'));
-    this.bind('error', () => this.onState('error', this.mediaErrorText()));
+    this.bind('error', () => this.handlePlaybackFailure(this.mediaErrorText()));
+    this.bind('ended', () => this.handlePlaybackFailure('直播流已结束'));
   }
 
   load(url: string): void {
@@ -44,9 +53,35 @@ export class StreamPlayer {
     }
     if (url === this.currentUrl && !this.video.error) return;
 
+    if (this.forceNextChange && url !== this.currentUrl) {
+      this.forceNextChange = false;
+      this.switchTo(url);
+      return;
+    }
+
+    if (this.currentUrl && this.isHealthy()) {
+      this.pendingUrl = url;
+      this.startStallWatch();
+      return;
+    }
+
+    this.switchTo(url);
+  }
+
+  expectNextUrl(): void {
+    this.forceNextChange = true;
+  }
+
+  private switchTo(url: string): void {
+    this.stopStallWatch();
+
     const generation = ++this.generation;
     this.destroyEngine();
+    this.video.pause();
+    this.video.removeAttribute('src');
+    this.video.load();
     this.currentUrl = url;
+    this.pendingUrl = '';
     this.onState('loading');
 
     if (/\.m3u8(?:$|\?)/i.test(url)) {
@@ -73,9 +108,16 @@ export class StreamPlayer {
   }
 
   unload(): void {
+    if (!this.currentUrl && !this.pendingUrl && !this.hls && !this.flv && !this.video.getAttribute('src')) {
+      this.onState('idle');
+      return;
+    }
     this.generation += 1;
+    this.stopStallWatch();
     this.destroyEngine();
     this.currentUrl = '';
+    this.pendingUrl = '';
+    this.forceNextChange = false;
     this.video.pause();
     this.video.removeAttribute('src');
     this.video.load();
@@ -100,15 +142,14 @@ export class StreamPlayer {
       return;
     }
 
-    this.hls = new Hls({
-      lowLatencyMode: true,
-      backBufferLength: 30,
-      liveSyncDurationCount: 2,
-    });
+    this.hls = new Hls();
     this.hls.on(Hls.Events.ERROR, (_event, data) => {
       if (data.fatal && this.isCurrent(url, generation)) {
-        this.onState('error', data.details || 'HLS 播放失败');
+        this.handlePlaybackFailure(data.details || 'HLS 播放失败');
       }
+    });
+    this.hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      if (this.isCurrent(url, generation)) void this.video.play().catch(() => undefined);
     });
     this.hls.loadSource(url);
     this.hls.attachMedia(this.video);
@@ -124,11 +165,10 @@ export class StreamPlayer {
 
     this.flv = mpegts.createPlayer(
       { type: 'flv', url, isLive: true },
-      { enableWorker: true, enableStashBuffer: false, liveBufferLatencyChasing: true },
     );
     this.flv.on(mpegts.Events.ERROR, (_type, detail) => {
       if (this.isCurrent(url, generation)) {
-        this.onState('error', String(detail || 'FLV 播放失败'));
+        this.handlePlaybackFailure(String(detail || 'FLV 播放失败'));
       }
     });
     this.flv.attachMediaElement(this.video);
@@ -138,6 +178,62 @@ export class StreamPlayer {
 
   private isCurrent(url: string, generation: number): boolean {
     return this.currentUrl === url && this.generation === generation;
+  }
+
+  private isHealthy(): boolean {
+    return Boolean(
+      this.currentUrl
+      && !this.video.error
+      && !this.video.ended
+      && !this.video.paused
+      && this.video.currentTime > 0
+      && this.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA,
+    );
+  }
+
+  private handlePlaybackFailure(detail: string): void {
+    if (!this.currentUrl) return;
+    if (this.pendingUrl && this.pendingUrl !== this.currentUrl) {
+      this.switchTo(this.pendingUrl);
+      return;
+    }
+    this.onState('error', detail);
+  }
+
+  private startStallWatch(): void {
+    if (this.stallTimer !== null || !this.pendingUrl) return;
+    this.lastTime = this.video.currentTime;
+    this.stalledTicks = 0;
+    this.stallTimer = window.setInterval(() => {
+      if (!this.pendingUrl) {
+        this.stopStallWatch();
+        return;
+      }
+      if (document.hidden) {
+        this.lastTime = this.video.currentTime;
+        this.stalledTicks = 0;
+        return;
+      }
+      if (this.video.error || this.video.ended) {
+        this.switchTo(this.pendingUrl);
+        return;
+      }
+      if (this.video.paused || this.video.seeking) {
+        this.lastTime = this.video.currentTime;
+        this.stalledTicks = 0;
+        return;
+      }
+      if (this.video.currentTime === this.lastTime) this.stalledTicks += 1;
+      else this.stalledTicks = 0;
+      this.lastTime = this.video.currentTime;
+      if (this.stalledTicks >= 6) this.switchTo(this.pendingUrl);
+    }, 2000);
+  }
+
+  private stopStallWatch(): void {
+    if (this.stallTimer !== null) window.clearInterval(this.stallTimer);
+    this.stallTimer = null;
+    this.stalledTicks = 0;
   }
 
   private destroyEngine(): void {

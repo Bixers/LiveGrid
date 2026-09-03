@@ -9,13 +9,22 @@ import {
   GripVertical,
   LayoutGrid,
   ListFilter,
+  Maximize2,
   Menu,
+  MessageCircle,
   Monitor,
+  Move,
+  Pause,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelRightClose,
   PanelRightOpen,
+  Play,
   Plus,
   Radio,
   RefreshCw,
   Search,
+  SlidersHorizontal,
   Star,
   Trash2,
   Volume2,
@@ -37,6 +46,7 @@ import {
 import { StreamPlayer, type PlayerState } from './player';
 import type {
   AppView,
+  DanmakuArea,
   LayoutMode,
   LiveEvent,
   Preferences,
@@ -44,6 +54,7 @@ import type {
   RoomFilter,
   StatsRoom,
   StreamRoom,
+  StreamWindowRect,
 } from './types';
 import './styles.css';
 
@@ -58,13 +69,22 @@ const iconSet: Record<string, IconNode> = {
   'grip-vertical': GripVertical,
   'layout-grid': LayoutGrid,
   'list-filter': ListFilter,
+  'maximize-2': Maximize2,
   menu: Menu,
+  'message-circle': MessageCircle,
   monitor: Monitor,
+  move: Move,
+  pause: Pause,
+  'panel-left-close': PanelLeftClose,
+  'panel-left-open': PanelLeftOpen,
+  'panel-right-close': PanelRightClose,
   'panel-right-open': PanelRightOpen,
+  play: Play,
   plus: Plus,
   radio: Radio,
   'refresh-cw': RefreshCw,
   search: Search,
+  'sliders-horizontal': SlidersHorizontal,
   star: Star,
   'trash-2': Trash2,
   'volume-2': Volume2,
@@ -103,8 +123,35 @@ const defaultPreferences: Preferences = {
   openRooms: demoMode ? demoRooms.slice(0, 3).map((room) => room.room) : [],
   favorites: [],
   mutedRooms: [],
+  danmakuHiddenRooms: [],
+  danmakuOpacity: 92,
+  danmakuFontSize: 14,
+  danmakuArea: 'top-third',
   layout: 'auto',
+  windowRects: {},
+  queueCollapsed: false,
+  inspectorCollapsed: false,
 };
+
+function readWindowRects(value: unknown): Record<string, StreamWindowRect> {
+  if (!value || typeof value !== 'object') return {};
+  return Object.fromEntries(Object.entries(value).flatMap(([roomId, candidate]) => {
+    if (!candidate || typeof candidate !== 'object') return [];
+    const rect = candidate as Partial<StreamWindowRect>;
+    if (![rect.x, rect.y, rect.width, rect.height].every(Number.isFinite)) return [];
+    return [[roomId, {
+      x: Number(rect.x),
+      y: Number(rect.y),
+      width: Number(rect.width),
+      height: Number(rect.height),
+    }]];
+  }));
+}
+
+function readNumberPreference(value: unknown, fallback: number, minimum: number, maximum: number): number {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.min(maximum, Math.max(minimum, number)) : fallback;
+}
 
 function readPreferences(): Preferences {
   try {
@@ -113,9 +160,18 @@ function readPreferences(): Preferences {
       openRooms: Array.isArray(saved.openRooms) ? saved.openRooms.map(String) : defaultPreferences.openRooms,
       favorites: Array.isArray(saved.favorites) ? saved.favorites.map(String) : [],
       mutedRooms: Array.isArray(saved.mutedRooms) ? saved.mutedRooms.map(String) : [],
-      layout: ['auto', '1', '2', '3', '4', 'focus'].includes(String(saved.layout))
+      danmakuHiddenRooms: Array.isArray(saved.danmakuHiddenRooms) ? saved.danmakuHiddenRooms.map(String) : [],
+      danmakuOpacity: readNumberPreference(saved.danmakuOpacity, defaultPreferences.danmakuOpacity, 20, 100),
+      danmakuFontSize: readNumberPreference(saved.danmakuFontSize, defaultPreferences.danmakuFontSize, 12, 28),
+      danmakuArea: ['top-quarter', 'top-third', 'top-half', 'full', 'bottom-half', 'bottom-quarter'].includes(String(saved.danmakuArea))
+        ? saved.danmakuArea as DanmakuArea
+        : defaultPreferences.danmakuArea,
+      layout: ['free', 'auto', '1', '2', '3', '4', 'focus'].includes(String(saved.layout))
         ? saved.layout as LayoutMode
         : 'auto',
+      windowRects: readWindowRects(saved.windowRects),
+      queueCollapsed: Boolean(saved.queueCollapsed),
+      inspectorCollapsed: Boolean(saved.inspectorCollapsed),
     };
   } catch {
     return { ...defaultPreferences };
@@ -129,11 +185,19 @@ const state = {
   openRooms: [...preferences.openRooms],
   favorites: new Set(preferences.favorites),
   mutedRooms: new Set(preferences.mutedRooms),
+  danmakuHiddenRooms: new Set(preferences.danmakuHiddenRooms),
+  danmakuOpacity: preferences.danmakuOpacity,
+  danmakuFontSize: preferences.danmakuFontSize,
+  danmakuArea: preferences.danmakuArea,
+  windowRects: { ...preferences.windowRects },
+  queueCollapsed: preferences.queueCollapsed,
+  inspectorCollapsed: preferences.inspectorCollapsed,
   selectedRooms: new Set<string>(),
   activeRoom: preferences.openRooms[0] ?? null as string | null,
   filter: 'all' as RoomFilter,
   query: '',
   layout: preferences.layout,
+  lastPresetLayout: (preferences.layout === 'free' ? 'auto' : preferences.layout) as Exclude<LayoutMode, 'free'>,
   view: 'monitor' as AppView,
   service: 'checking' as 'checking' | 'online' | 'degraded' | 'offline',
   serviceMessage: '正在连接本地服务',
@@ -143,6 +207,8 @@ const state = {
 
 const players = new Map<string, StreamPlayer>();
 const playerStates = new Map<string, { state: PlayerState; detail: string }>();
+const danmakuStates = new Map<string, { ok: boolean; text: string }>();
+const danmakuLanes = new Map<string, number[]>();
 const events: LiveEvent[] = demoMode ? [
   { type: 'chat', room: '612904', nn: '演示观众', txt: '今晚的赛程开始了', time: Date.now() - 42000 },
   { type: 'gift', room: '883120', nn: '山风', giftName: '荧光棒', count: 6, time: Date.now() - 18000 },
@@ -153,6 +219,7 @@ let statsAbort: AbortController | null = null;
 let danmakuSource: EventSource | null = null;
 let danmakuIntent = '';
 let pendingRemovalIds: string[] = [];
+let zIndexCounter = 1;
 
 app.innerHTML = `
   <a class="skip-link" href="#main-workspace">跳到主要工作区</a>
@@ -176,6 +243,9 @@ app.innerHTML = `
       </nav>
 
       <div class="topbar-actions">
+        <button type="button" class="icon-button desktop-panel-toggle" id="queue-panel-button" aria-label="隐藏房间队列" title="隐藏房间队列" aria-pressed="false">
+          <i data-lucide="panel-left-close"></i>
+        </button>
         <div id="service-status" class="service-status is-checking" role="status" aria-atomic="true">
           <span class="status-signal" aria-hidden="true"></span>
           <span id="service-label">正在连接本地服务</span>
@@ -188,8 +258,8 @@ app.innerHTML = `
         <button type="button" class="icon-button mobile-only" id="room-drawer-button" aria-label="打开房间队列" title="打开房间队列">
           <i data-lucide="menu"></i>
         </button>
-        <button type="button" class="icon-button inspector-toggle" id="inspector-button" aria-label="打开房间检查器" title="打开房间检查器">
-          <i data-lucide="panel-right-open"></i>
+        <button type="button" class="icon-button inspector-toggle" id="inspector-button" aria-label="隐藏房间检查器" title="隐藏房间检查器" aria-pressed="false">
+          <i data-lucide="panel-right-close"></i>
         </button>
       </div>
     </header>
@@ -201,7 +271,7 @@ app.innerHTML = `
             <h2>房间队列</h2>
             <p id="room-summary">0 个房间</p>
           </div>
-          <button type="button" class="icon-button mobile-only" data-action="close-room-drawer" aria-label="关闭房间队列" title="关闭">
+          <button type="button" class="icon-button panel-close" data-action="close-room-drawer" aria-label="隐藏房间队列" title="隐藏房间队列">
             <i data-lucide="x"></i>
           </button>
         </div>
@@ -260,6 +330,12 @@ app.innerHTML = `
               <span id="canvas-count">0 路已打开</span>
             </div>
             <div class="surface-controls">
+              <label class="free-window-toggle" title="开启后可拖动和缩放直播窗口">
+                <input id="free-window-toggle" type="checkbox" />
+                <span class="toggle-track" aria-hidden="true"><span></span></span>
+                <i data-lucide="move"></i>
+                <span class="free-window-label">自由窗口</span>
+              </label>
               <div class="segmented-control layout-control" aria-label="画布布局">
                 <button type="button" data-layout="auto" aria-label="自动布局" title="自动布局"><i data-lucide="layout-grid"></i></button>
                 <button type="button" data-layout="1" aria-label="单列布局" title="单列布局">1</button>
@@ -268,10 +344,13 @@ app.innerHTML = `
                 <button type="button" data-layout="4" aria-label="四列布局" title="四列布局">4</button>
                 <button type="button" data-layout="focus" aria-label="重点布局" title="重点布局"><i data-lucide="focus"></i></button>
               </div>
-              <button type="button" class="tool-button" data-action="mute-all">
+              <button type="button" class="tool-button" data-action="open-danmaku-settings" aria-label="弹幕设置" title="弹幕设置">
+                <i data-lucide="sliders-horizontal"></i><span>弹幕设置</span>
+              </button>
+              <button type="button" class="tool-button" data-action="mute-all" aria-label="全部静音" title="全部静音">
                 <i data-lucide="volume-x"></i><span>全部静音</span>
               </button>
-              <button type="button" class="tool-button" data-action="refresh-all">
+              <button type="button" class="tool-button" data-action="refresh-all" aria-label="刷新流" title="刷新流">
                 <i data-lucide="refresh-cw"></i><span>刷新流</span>
               </button>
             </div>
@@ -326,7 +405,7 @@ app.innerHTML = `
             <h2>房间检查器</h2>
             <p>当前上下文</p>
           </div>
-          <button type="button" class="icon-button inspector-close" data-action="close-inspector" aria-label="关闭检查器" title="关闭">
+          <button type="button" class="icon-button inspector-close" data-action="close-inspector" aria-label="隐藏检查器" title="隐藏检查器">
             <i data-lucide="x"></i>
           </button>
         </div>
@@ -343,6 +422,42 @@ app.innerHTML = `
       <div class="dialog-actions">
         <button value="cancel" class="secondary-button">取消</button>
         <button value="confirm" class="danger-button" id="confirm-remove">确认移除</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="danmaku-settings-dialog" class="danmaku-settings-dialog">
+    <form method="dialog">
+      <div class="settings-dialog-header">
+        <div>
+          <h2>弹幕显示</h2>
+          <p>全部直播窗口</p>
+        </div>
+        <button value="cancel" class="row-icon-button" aria-label="关闭弹幕设置" title="关闭"><i data-lucide="x"></i></button>
+      </div>
+      <div class="danmaku-setting-row">
+        <label for="danmaku-opacity">透明度</label>
+        <output id="danmaku-opacity-output" for="danmaku-opacity">92%</output>
+        <input id="danmaku-opacity" type="range" min="20" max="100" step="5" />
+      </div>
+      <div class="danmaku-setting-row">
+        <label for="danmaku-font-size">字号</label>
+        <output id="danmaku-font-size-output" for="danmaku-font-size">14 px</output>
+        <input id="danmaku-font-size" type="range" min="12" max="28" step="1" />
+      </div>
+      <label class="danmaku-area-field" for="danmaku-area">
+        <span>显示区域</span>
+        <select id="danmaku-area">
+          <option value="top-quarter">顶部 1/4</option>
+          <option value="top-third">顶部 1/3</option>
+          <option value="top-half">上半屏</option>
+          <option value="full">全屏</option>
+          <option value="bottom-half">下半屏</option>
+          <option value="bottom-quarter">底部 1/4</option>
+        </select>
+      </label>
+      <div class="dialog-actions">
+        <button value="close" class="primary-button">完成</button>
       </div>
     </form>
   </dialog>
@@ -381,8 +496,13 @@ const roomInputError = element<HTMLParagraphElement>('room-input-error');
 const roomSearch = element<HTMLInputElement>('room-search');
 const selectAll = element<HTMLInputElement>('select-all');
 const confirmDialog = element<HTMLDialogElement>('confirm-dialog');
+const danmakuSettingsDialog = element<HTMLDialogElement>('danmaku-settings-dialog');
+const danmakuOpacityInput = element<HTMLInputElement>('danmaku-opacity');
+const danmakuFontSizeInput = element<HTMLInputElement>('danmaku-font-size');
+const danmakuAreaSelect = element<HTMLSelectElement>('danmaku-area');
 const commandDialog = element<HTMLDialogElement>('command-dialog');
 const commandInput = element<HTMLInputElement>('command-input');
+const freeWindowToggle = element<HTMLInputElement>('free-window-toggle');
 
 function drawIcons(): void {
   document.querySelectorAll<HTMLElement>('i[data-lucide]').forEach((placeholder) => {
@@ -405,9 +525,114 @@ function savePreferences(): void {
     openRooms: state.openRooms,
     favorites: [...state.favorites],
     mutedRooms: [...state.mutedRooms],
+    danmakuHiddenRooms: [...state.danmakuHiddenRooms],
+    danmakuOpacity: state.danmakuOpacity,
+    danmakuFontSize: state.danmakuFontSize,
+    danmakuArea: state.danmakuArea,
     layout: state.layout,
+    windowRects: state.windowRects,
+    queueCollapsed: state.queueCollapsed,
+    inspectorCollapsed: state.inspectorCollapsed,
   };
   localStorage.setItem(storageKey, JSON.stringify(value));
+}
+
+const desktopQueueMedia = window.matchMedia('(min-width: 901px)');
+const desktopInspectorMedia = window.matchMedia('(min-width: 1181px)');
+
+function setControlIcon(button: HTMLButtonElement, iconName: string): void {
+  const icon = iconSet[iconName];
+  if (!icon) return;
+  button.replaceChildren(createElement(icon, {
+    'aria-hidden': 'true',
+    focusable: 'false',
+    'stroke-width': '1.8',
+  }));
+}
+
+function applyDanmakuDisplaySettings(persist = false): void {
+  videoGrid.style.setProperty('--danmaku-opacity', String(state.danmakuOpacity / 100));
+  videoGrid.style.setProperty('--danmaku-font-size', `${state.danmakuFontSize}px`);
+  videoGrid.dataset.danmakuArea = state.danmakuArea;
+  danmakuOpacityInput.value = String(state.danmakuOpacity);
+  danmakuFontSizeInput.value = String(state.danmakuFontSize);
+  danmakuAreaSelect.value = state.danmakuArea;
+  element<HTMLOutputElement>('danmaku-opacity-output').value = `${state.danmakuOpacity}%`;
+  element<HTMLOutputElement>('danmaku-font-size-output').value = `${state.danmakuFontSize} px`;
+  danmakuLanes.clear();
+  if (persist) savePreferences();
+}
+
+function openDanmakuSettings(): void {
+  applyDanmakuDisplaySettings();
+  danmakuSettingsDialog.showModal();
+}
+
+function applyPanelVisibility(): void {
+  const queueCollapsed = desktopQueueMedia.matches && state.queueCollapsed;
+  const inspectorCollapsed = desktopInspectorMedia.matches && state.inspectorCollapsed;
+  document.body.classList.toggle('queue-collapsed', queueCollapsed);
+  document.body.classList.toggle('inspector-collapsed', inspectorCollapsed);
+
+  const queueButton = element<HTMLButtonElement>('queue-panel-button');
+  queueButton.setAttribute('aria-pressed', String(queueCollapsed));
+  queueButton.setAttribute('aria-label', queueCollapsed ? '显示房间队列' : '隐藏房间队列');
+  queueButton.title = queueCollapsed ? '显示房间队列' : '隐藏房间队列';
+  setControlIcon(queueButton, queueCollapsed ? 'panel-left-open' : 'panel-left-close');
+
+  const inspectorButton = element<HTMLButtonElement>('inspector-button');
+  const inspectorOpen = desktopInspectorMedia.matches
+    ? !inspectorCollapsed
+    : document.body.classList.contains('inspector-open');
+  inspectorButton.setAttribute('aria-pressed', String(!inspectorOpen));
+  inspectorButton.setAttribute('aria-label', inspectorOpen ? '隐藏房间检查器' : '显示房间检查器');
+  inspectorButton.title = inspectorOpen ? '隐藏房间检查器' : '显示房间检查器';
+  setControlIcon(inspectorButton, inspectorOpen ? 'panel-right-close' : 'panel-right-open');
+}
+
+function toggleQueuePanel(): void {
+  if (!desktopQueueMedia.matches) {
+    document.body.classList.toggle('room-drawer-open');
+    return;
+  }
+  state.queueCollapsed = !state.queueCollapsed;
+  savePreferences();
+  applyPanelVisibility();
+  window.setTimeout(constrainAllWindows, 220);
+}
+
+function hideQueuePanel(): void {
+  if (desktopQueueMedia.matches) {
+    state.queueCollapsed = true;
+    savePreferences();
+    applyPanelVisibility();
+    window.setTimeout(constrainAllWindows, 220);
+  } else {
+    document.body.classList.remove('room-drawer-open');
+  }
+}
+
+function toggleInspectorPanel(): void {
+  if (!desktopInspectorMedia.matches) {
+    document.body.classList.toggle('inspector-open');
+    applyPanelVisibility();
+    return;
+  }
+  state.inspectorCollapsed = !state.inspectorCollapsed;
+  savePreferences();
+  applyPanelVisibility();
+  window.setTimeout(constrainAllWindows, 220);
+}
+
+function hideInspectorPanel(): void {
+  if (desktopInspectorMedia.matches) {
+    state.inspectorCollapsed = true;
+    savePreferences();
+  } else {
+    document.body.classList.remove('inspector-open');
+  }
+  applyPanelVisibility();
+  window.setTimeout(constrainAllWindows, 220);
 }
 
 function roomById(roomId: string): StreamRoom | undefined {
@@ -560,10 +785,10 @@ function createStreamCard(roomId: string): HTMLElement {
   const card = document.createElement('article');
   card.className = 'stream-card';
   card.dataset.room = roomId;
-  card.draggable = true;
+  card.style.zIndex = String(++zIndexCounter);
   card.innerHTML = `
     <div class="stream-chrome">
-      <button type="button" class="drag-handle" aria-label="调整画面顺序，使用方向键移动" title="拖动或使用方向键排序"><i data-lucide="grip-vertical"></i></button>
+      <button type="button" class="drag-handle" aria-label="移动直播窗口；方向键移动，Alt 加方向键调整大小" title="拖动窗口；方向键移动；Alt+方向键调整大小"><i data-lucide="grip-vertical"></i></button>
       <div class="stream-title"><strong></strong><small></small></div>
       <span class="stream-duration">00:00:00</span>
       <label class="quality-select">
@@ -576,26 +801,83 @@ function createStreamCard(roomId: string): HTMLElement {
         </select>
         <i data-lucide="chevron-down"></i>
       </label>
-      <button type="button" class="row-icon-button" data-action="toggle-mute" aria-label="切换静音" title="切换静音"></button>
-      <button type="button" class="row-icon-button" data-action="close-room" aria-label="关闭画面" title="关闭画面"><i data-lucide="x"></i></button>
+      <button type="button" class="row-icon-button danmaku-button" data-action="toggle-danmaku" aria-label="隐藏弹幕" title="隐藏弹幕"><i data-lucide="message-circle"></i></button>
+      <button type="button" class="row-icon-button mute-button" data-action="toggle-mute" aria-label="切换静音" title="切换静音"></button>
+      <button type="button" class="row-icon-button close-stream-button" data-action="close-room" aria-label="关闭画面" title="关闭画面"><i data-lucide="x"></i></button>
     </div>
     <div class="video-frame">
-      <video autoplay muted controls playsinline></video>
+      <video autoplay muted playsinline></video>
       <div class="player-state">
         <i data-lucide="activity"></i>
         <strong>等待直播流</strong>
         <span></span>
       </div>
+      <div class="danmaku-layer" aria-hidden="true"></div>
       <div class="stream-state-tag"></div>
+      <div class="video-controls" aria-label="直播播放控制">
+        <button type="button" class="media-control-button" data-action="toggle-playback" aria-label="暂停" title="暂停"><i data-lucide="pause"></i></button>
+        <span class="live-control-status"><span aria-hidden="true"></span>直播</span>
+        <span class="video-controls-spacer"></span>
+        <button type="button" class="media-control-button media-mute-button" data-action="toggle-mute" aria-label="静音" title="静音"><i data-lucide="volume-2"></i></button>
+        <button type="button" class="media-control-button" data-action="fullscreen-room" aria-label="全屏" title="全屏"><i data-lucide="maximize-2"></i></button>
+      </div>
     </div>
+    <div class="resize-handle resize-n" data-resize="n"></div>
+    <div class="resize-handle resize-s" data-resize="s"></div>
+    <div class="resize-handle resize-e" data-resize="e"></div>
+    <div class="resize-handle resize-w" data-resize="w"></div>
+    <div class="resize-handle resize-ne" data-resize="ne"></div>
+    <div class="resize-handle resize-nw" data-resize="nw"></div>
+    <div class="resize-handle resize-se" data-resize="se"></div>
+    <div class="resize-handle resize-sw" data-resize="sw"></div>
   `;
   const video = card.querySelector<HTMLVideoElement>('video')!;
   const player = new StreamPlayer(video, (playerState, detail = '') => {
     playerStates.set(roomId, { state: playerState, detail });
     updatePlayerState(roomId);
+    updatePlaybackControls(roomId);
   });
   players.set(roomId, player);
+  for (const eventName of ['play', 'pause', 'volumechange'] as const) {
+    video.addEventListener(eventName, () => updatePlaybackControls(roomId));
+  }
+  card.addEventListener('pointerdown', (event) => {
+    const target = event.target as HTMLElement;
+    if (target.closest('.stream-chrome [data-action], .stream-chrome select, .video-controls [data-action]')) {
+      event.stopPropagation();
+    }
+  });
+  card.addEventListener('click', (event) => {
+    const actionButton = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-action]');
+    if (!actionButton) return;
+    event.stopPropagation();
+    performAction(actionButton.dataset.action ?? '', roomId);
+  });
   return card;
+}
+
+function updatePlaybackControls(roomId: string): void {
+  const card = videoGrid.querySelector<HTMLElement>(`.stream-card[data-room="${roomId}"]`);
+  const video = card?.querySelector<HTMLVideoElement>('video');
+  const room = roomById(roomId);
+  if (!card || !video || !room) return;
+  const hasStream = room.ok && Boolean(room.url) && !demoMode;
+  const paused = video.paused;
+  const playButton = card.querySelector<HTMLButtonElement>('[data-action="toggle-playback"]')!;
+  const muteButton = card.querySelector<HTMLButtonElement>('.media-mute-button')!;
+
+  card.classList.toggle('has-stream', hasStream);
+  card.classList.toggle('is-paused', hasStream && paused);
+  playButton.disabled = !hasStream;
+  playButton.setAttribute('aria-label', paused ? '播放' : '暂停');
+  playButton.title = paused ? '播放' : '暂停';
+  setControlIcon(playButton, paused ? 'play' : 'pause');
+  muteButton.disabled = !hasStream;
+  muteButton.classList.toggle('is-active', video.muted);
+  muteButton.setAttribute('aria-pressed', String(video.muted));
+  muteButton.setAttribute('aria-label', video.muted ? '取消静音' : '静音');
+  muteButton.title = video.muted ? '取消静音' : '静音';
+  setControlIcon(muteButton, video.muted ? 'volume-x' : 'volume-2');
 }
 
 function updatePlayerState(roomId: string): void {
@@ -641,6 +923,15 @@ function updatePlayerState(roomId: string): void {
 function updateStreamCard(card: HTMLElement, room: StreamRoom): void {
   card.classList.toggle('is-active', state.activeRoom === room.room);
   card.classList.toggle('is-live', room.ok);
+  card.classList.toggle('is-free', state.layout === 'free');
+  const dragHandle = card.querySelector<HTMLButtonElement>('.drag-handle')!;
+  dragHandle.disabled = state.layout !== 'free';
+  dragHandle.setAttribute('aria-label', state.layout === 'free'
+    ? '移动直播窗口；方向键移动，Alt 加方向键调整大小'
+    : '开启自由窗口后可移动直播窗口');
+  dragHandle.title = state.layout === 'free'
+    ? '拖动窗口；方向键移动；Alt+方向键调整大小'
+    : '开启自由窗口后可拖动';
   const roomName = displayRoomName(room, room.room);
   const roomCode = `ROOM ${room.room}`;
   const title = card.querySelector<HTMLElement>('.stream-title strong')!;
@@ -656,11 +947,15 @@ function updateStreamCard(card: HTMLElement, room: StreamRoom): void {
   const quality = card.querySelector<HTMLSelectElement>('[data-quality]')!;
   quality.value = room.quality;
   const muted = state.mutedRooms.has(room.room);
-  const muteButton = card.querySelector<HTMLButtonElement>('[data-action="toggle-mute"]')!;
+  const muteButton = card.querySelector<HTMLButtonElement>('.stream-chrome [data-action="toggle-mute"]')!;
   muteButton.innerHTML = muted ? '<i data-lucide="volume-x"></i>' : '<i data-lucide="volume-2"></i>';
+  muteButton.classList.toggle('is-active', muted);
+  muteButton.setAttribute('aria-pressed', String(muted));
   muteButton.setAttribute('aria-label', muted ? '取消静音' : '静音');
   muteButton.title = muted ? '取消静音' : '静音';
   players.get(room.room)?.setMuted(muted);
+
+  updateDanmakuControl(room.room);
 
   if (!room.ok || !room.url || demoMode) {
     players.get(room.room)?.unload();
@@ -669,10 +964,115 @@ function updateStreamCard(card: HTMLElement, room: StreamRoom): void {
     players.get(room.room)?.load(room.url);
   }
   updatePlayerState(room.room);
+  updatePlaybackControls(room.room);
+}
+
+const minimumWindowWidth = 320;
+const minimumWindowHeight = 220;
+const windowGap = 8;
+
+function clampWindowRect(rect: StreamWindowRect): StreamWindowRect {
+  const widthLimit = Math.max(240, videoGrid.clientWidth - windowGap * 2);
+  const heightLimit = Math.max(180, videoGrid.clientHeight - windowGap * 2);
+  const minimumWidth = Math.min(minimumWindowWidth, widthLimit);
+  const minimumHeight = Math.min(minimumWindowHeight, heightLimit);
+  const width = Math.min(Math.max(rect.width, minimumWidth), widthLimit);
+  const height = Math.min(Math.max(rect.height, minimumHeight), heightLimit);
+  return {
+    x: Math.min(Math.max(rect.x, windowGap), Math.max(windowGap, videoGrid.clientWidth - width - windowGap)),
+    y: Math.min(Math.max(rect.y, windowGap), Math.max(windowGap, videoGrid.clientHeight - height - windowGap)),
+    width,
+    height,
+  };
+}
+
+function defaultWindowRect(index: number): StreamWindowRect {
+  const width = Math.min(560, Math.max(minimumWindowWidth, videoGrid.clientWidth * 0.62));
+  const height = Math.min(360, Math.max(minimumWindowHeight, videoGrid.clientHeight * 0.58));
+  const offset = (index % 8) * 24;
+  return clampWindowRect({ x: windowGap + offset, y: windowGap + offset, width, height });
+}
+
+function applyWindowRect(card: HTMLElement, roomId: string, rect: StreamWindowRect, remember = true): void {
+  const next = clampWindowRect(rect);
+  if (remember) state.windowRects[roomId] = next;
+  card.style.width = `${Math.round(next.width)}px`;
+  card.style.height = `${Math.round(next.height)}px`;
+  card.style.transform = `translate3d(${Math.round(next.x)}px, ${Math.round(next.y)}px, 0)`;
+}
+
+function arrangeWindows(layout: Exclude<LayoutMode, 'free'>, persist = true): void {
+  const roomIds = state.openRooms.filter((roomId) => roomById(roomId));
+  if (roomIds.length === 0 || videoGrid.clientWidth === 0 || videoGrid.clientHeight === 0) return;
+  const availableWidth = Math.max(1, videoGrid.clientWidth - windowGap * 2);
+  const availableHeight = Math.max(1, videoGrid.clientHeight - windowGap * 2);
+
+  if (layout === 'focus' && roomIds.length > 1) {
+    const focusId = state.activeRoom && roomIds.includes(state.activeRoom) ? state.activeRoom : roomIds[0]!;
+    const sideIds = roomIds.filter((roomId) => roomId !== focusId);
+    const focusWidth = Math.max(minimumWindowWidth, Math.floor(availableWidth * 0.68));
+    const sideWidth = Math.max(240, availableWidth - focusWidth - windowGap);
+    applyWindowRect(videoGrid.querySelector<HTMLElement>(`.stream-card[data-room="${focusId}"]`)! , focusId, {
+      x: windowGap,
+      y: windowGap,
+      width: focusWidth,
+      height: availableHeight,
+    }, false);
+    const sideHeight = (availableHeight - windowGap * Math.max(0, sideIds.length - 1)) / sideIds.length;
+    sideIds.forEach((roomId, index) => {
+      const card = videoGrid.querySelector<HTMLElement>(`.stream-card[data-room="${roomId}"]`);
+      if (!card) return;
+      applyWindowRect(card, roomId, {
+        x: windowGap + focusWidth + windowGap,
+        y: windowGap + index * (sideHeight + windowGap),
+        width: sideWidth,
+        height: sideHeight,
+      }, false);
+    });
+  } else {
+    const requestedColumns = layout === 'auto'
+      ? Math.ceil(Math.sqrt(roomIds.length * Math.max(0.7, availableWidth / Math.max(availableHeight, 1)) * 0.72))
+      : Number(layout);
+    const columns = Math.max(1, Math.min(roomIds.length, Number.isFinite(requestedColumns) ? requestedColumns : 1));
+    const rows = Math.ceil(roomIds.length / columns);
+    const cellWidth = (availableWidth - windowGap * (columns - 1)) / columns;
+    const cellHeight = (availableHeight - windowGap * (rows - 1)) / rows;
+    roomIds.forEach((roomId, index) => {
+      const card = videoGrid.querySelector<HTMLElement>(`.stream-card[data-room="${roomId}"]`);
+      if (!card) return;
+      const column = index % columns;
+      const row = Math.floor(index / columns);
+      applyWindowRect(card, roomId, {
+        x: windowGap + column * (cellWidth + windowGap),
+        y: windowGap + row * (cellHeight + windowGap),
+        width: cellWidth,
+        height: cellHeight,
+      }, false);
+    });
+  }
+  if (persist) savePreferences();
+}
+
+function constrainAllWindows(): void {
+  if (state.layout !== 'free') {
+    arrangeWindows(state.layout, false);
+    return;
+  }
+  state.openRooms.forEach((roomId, index) => {
+    const card = videoGrid.querySelector<HTMLElement>(`.stream-card[data-room="${roomId}"]`);
+    if (!card) return;
+    applyWindowRect(card, roomId, state.windowRects[roomId] ?? defaultWindowRect(index));
+  });
+}
+
+function bringWindowToFront(card: HTMLElement): void {
+  card.style.zIndex = String(++zIndexCounter);
 }
 
 function renderCanvas(): void {
   videoGrid.dataset.layout = state.layout;
+  freeWindowToggle.checked = state.layout === 'free';
+  freeWindowToggle.setAttribute('aria-checked', String(freeWindowToggle.checked));
   document.querySelectorAll<HTMLButtonElement>('[data-layout]').forEach((button) => {
     const selected = button.dataset.layout === state.layout;
     button.classList.toggle('is-active', selected);
@@ -696,8 +1096,6 @@ function renderCanvas(): void {
     if (!card) {
       card = createStreamCard(roomId);
       videoGrid.appendChild(card);
-    } else {
-      videoGrid.appendChild(card);
     }
     updateStreamCard(card, room);
   });
@@ -706,7 +1104,83 @@ function renderCanvas(): void {
   element<HTMLSpanElement>('canvas-count').textContent = `${openCount} 路已打开`;
   canvasEmpty.hidden = openCount > 0;
   videoGrid.hidden = openCount === 0;
+  if (openCount > 0) {
+    if (state.layout === 'free') constrainAllWindows();
+    else arrangeWindows(state.layout, false);
+  }
   drawIcons();
+}
+
+const danmakuColors: Record<string, string> = {
+  '1': '#ff7078',
+  '2': '#73b7ff',
+  '3': '#72e6a4',
+  '4': '#ffb970',
+  '5': '#d69aff',
+  '6': '#ff8fcf',
+  '7': '#ffe174',
+};
+
+function updateDanmakuControl(roomId: string): void {
+  const card = videoGrid.querySelector<HTMLElement>(`.stream-card[data-room="${roomId}"]`);
+  if (!card) return;
+  const visible = !state.danmakuHiddenRooms.has(roomId);
+  const connection = danmakuStates.get(roomId);
+  const button = card.querySelector<HTMLButtonElement>('[data-action="toggle-danmaku"]');
+  const layer = card.querySelector<HTMLElement>('.danmaku-layer');
+  if (!button || !layer) return;
+  button.classList.toggle('is-active', visible);
+  button.classList.toggle('is-connected', visible && Boolean(connection?.ok));
+  button.setAttribute('aria-pressed', String(visible));
+  button.setAttribute('aria-label', visible ? '隐藏弹幕' : '显示弹幕');
+  button.title = visible ? (connection?.text || '隐藏弹幕') : '显示弹幕';
+  layer.hidden = !visible;
+}
+
+function addDanmakuItem(roomId: string, event: LiveEvent): void {
+  if (state.danmakuHiddenRooms.has(roomId)) return;
+  const text = String(event.txt ?? event.text ?? '').trim();
+  if (!text) return;
+  const layer = videoGrid.querySelector<HTMLElement>(`.stream-card[data-room="${roomId}"] .danmaku-layer`);
+  if (!layer || layer.hidden) return;
+
+  const item = document.createElement('span');
+  item.className = 'danmaku-item';
+  item.textContent = text;
+  item.style.color = danmakuColors[String(event.col ?? '')] ?? '#ffffff';
+  layer.appendChild(item);
+
+  const laneHeight = Math.max(24, item.offsetHeight + 5);
+  const laneCount = Math.max(1, Math.floor((layer.clientHeight - 8) / laneHeight));
+  const lanes = danmakuLanes.get(roomId) ?? [];
+  if (lanes.length !== laneCount) {
+    lanes.length = 0;
+    lanes.push(...Array.from({ length: laneCount }, () => 0));
+  }
+  const now = performance.now();
+  let laneIndex = 0;
+  for (let index = 1; index < lanes.length; index += 1) {
+    if ((lanes[index] ?? 0) < (lanes[laneIndex] ?? 0)) laneIndex = index;
+  }
+  if ((lanes[laneIndex] ?? 0) > now) {
+    item.remove();
+    return;
+  }
+
+  item.style.top = `${4 + laneIndex * laneHeight}px`;
+  const distance = layer.clientWidth + item.offsetWidth;
+  const duration = Math.max(3600, (distance / 72) * 1000);
+  lanes[laneIndex] = now + duration;
+  danmakuLanes.set(roomId, lanes);
+  const animation = item.animate(
+    [
+      { transform: `translate3d(${layer.clientWidth}px, 0, 0)` },
+      { transform: `translate3d(${-item.offsetWidth}px, 0, 0)` },
+    ],
+    { duration, easing: 'linear' },
+  );
+  animation.onfinish = () => item.remove();
+  while (layer.children.length > 60) layer.firstElementChild?.remove();
 }
 
 function renderInspector(): void {
@@ -1007,16 +1481,28 @@ function connectDanmaku(): void {
   source.onmessage = (message) => {
     try {
       const event = JSON.parse(message.data) as LiveEvent;
-      if (event.type === 'status') return;
+      const roomId = String(event.room ?? event.rid ?? '');
+      if (event.type === 'status') {
+        if (roomId) {
+          danmakuStates.set(roomId, { ok: Boolean(event.ok), text: String(event.text ?? event.txt ?? '弹幕连接状态') });
+          updateDanmakuControl(roomId);
+        }
+        return;
+      }
       events.unshift({ ...event, time: event.time ?? Date.now() });
       if (events.length > 200) events.length = 200;
-      if (state.activeRoom === String(event.room ?? event.rid ?? '')) renderInspector();
+      if (event.type === 'chat' && roomId) addDanmakuItem(roomId, event);
+      if (state.activeRoom === roomId) renderInspector();
     } catch {
       // Ignore malformed third-party event payloads.
     }
   };
   source.onerror = () => {
     state.eventState = 'retrying';
+    state.openRooms.forEach((roomId) => {
+      danmakuStates.set(roomId, { ok: false, text: '弹幕重连中' });
+      updateDanmakuControl(roomId);
+    });
     renderInspector();
   };
 }
@@ -1037,6 +1523,8 @@ function closeRoom(roomId: string): void {
   players.get(roomId)?.destroy();
   players.delete(roomId);
   playerStates.delete(roomId);
+  danmakuStates.delete(roomId);
+  danmakuLanes.delete(roomId);
   if (state.activeRoom === roomId) state.activeRoom = state.openRooms[0] ?? null;
   savePreferences();
   renderRoomList();
@@ -1074,10 +1562,44 @@ function toggleMute(roomId: string): void {
   renderInspector();
 }
 
+async function togglePlayback(roomId: string): Promise<void> {
+  const card = videoGrid.querySelector<HTMLElement>(`.stream-card[data-room="${roomId}"]`);
+  const video = card?.querySelector<HTMLVideoElement>('video');
+  if (!video || !card?.classList.contains('has-stream')) return;
+  if (video.paused) {
+    try {
+      await video.play();
+    } catch {
+      toast('当前直播流无法继续播放', 'error');
+    }
+  } else {
+    video.pause();
+  }
+  updatePlaybackControls(roomId);
+}
+
+function fullscreenRoom(roomId: string): void {
+  const frame = videoGrid.querySelector<HTMLElement>(`.stream-card[data-room="${roomId}"] .video-frame`);
+  if (!frame) return;
+  void frame.requestFullscreen().catch(() => toast('当前环境无法进入全屏', 'error'));
+}
+
+function toggleDanmaku(roomId: string): void {
+  if (state.danmakuHiddenRooms.has(roomId)) state.danmakuHiddenRooms.delete(roomId);
+  else state.danmakuHiddenRooms.add(roomId);
+  if (state.danmakuHiddenRooms.has(roomId)) {
+    videoGrid.querySelector<HTMLElement>(`.stream-card[data-room="${roomId}"] .danmaku-layer`)?.replaceChildren();
+    danmakuLanes.delete(roomId);
+  }
+  savePreferences();
+  updateDanmakuControl(roomId);
+}
+
 async function refreshAll(): Promise<void> {
   const button = document.querySelector<HTMLButtonElement>('[data-action="refresh-all"]');
   button?.classList.add('is-busy');
   try {
+    players.forEach((player) => player.expectNextUrl());
     if (!demoMode) await refreshStreams();
     await loadRooms(true);
     toast('直播流地址已刷新', 'success');
@@ -1093,6 +1615,7 @@ async function changeQuality(roomId: string, quality: Quality): Promise<void> {
   if (!room || room.quality === quality) return;
   const previous = room.quality;
   room.quality = quality;
+  players.get(roomId)?.expectNextUrl();
   renderCanvas();
   renderInspector();
   try {
@@ -1183,9 +1706,10 @@ function switchView(view: AppView): void {
 }
 
 function setLayout(layout: LayoutMode): void {
+  if (layout !== 'free') state.lastPresetLayout = layout;
   state.layout = layout;
-  savePreferences();
   renderCanvas();
+  savePreferences();
 }
 
 function renderCommands(query = ''): void {
@@ -1196,7 +1720,15 @@ function renderCommands(query = ''): void {
     { id: 'refresh', icon: 'refresh-cw', label: '刷新全部直播流', run: () => void refreshAll() },
     { id: 'mute', icon: 'volume-x', label: '静音全部画面', run: () => muteAll() },
     { id: 'focus', icon: 'focus', label: '切换重点布局', run: () => setLayout('focus') },
-    { id: 'queue', icon: 'list-filter', label: '打开房间队列', run: () => document.body.classList.add('room-drawer-open') },
+    { id: 'queue', icon: 'list-filter', label: '显示房间队列', run: () => {
+      if (desktopQueueMedia.matches) {
+        state.queueCollapsed = false;
+        savePreferences();
+        applyPanelVisibility();
+      } else {
+        document.body.classList.add('room-drawer-open');
+      }
+    } },
   ].filter((command) => command.label.toLocaleLowerCase('zh-CN').includes(normalized));
   const results = element<HTMLDivElement>('command-results');
   results.replaceChildren();
@@ -1256,6 +1788,18 @@ function performAction(action: string, roomId: string): void {
     case 'toggle-mute':
       toggleMute(roomId);
       break;
+    case 'toggle-danmaku':
+      toggleDanmaku(roomId);
+      break;
+    case 'toggle-playback':
+      void togglePlayback(roomId);
+      break;
+    case 'fullscreen-room':
+      fullscreenRoom(roomId);
+      break;
+    case 'open-danmaku-settings':
+      openDanmakuSettings();
+      break;
     case 'refresh-room':
     case 'refresh-all':
       void refreshAll();
@@ -1288,13 +1832,19 @@ function performAction(action: string, roomId: string): void {
       void loadAnalytics();
       break;
     case 'open-room-drawer':
-      document.body.classList.add('room-drawer-open');
+      if (desktopQueueMedia.matches) {
+        state.queueCollapsed = false;
+        savePreferences();
+        applyPanelVisibility();
+      } else {
+        document.body.classList.add('room-drawer-open');
+      }
       break;
     case 'close-room-drawer':
-      document.body.classList.remove('room-drawer-open');
+      hideQueuePanel();
       break;
     case 'close-inspector':
-      document.body.classList.remove('inspector-open');
+      hideInspectorPanel();
       break;
     case 'close-command':
       commandDialog.close();
@@ -1329,6 +1879,10 @@ app.addEventListener('click', (event) => {
 
 app.addEventListener('change', (event) => {
   const target = event.target as HTMLInputElement | HTMLSelectElement;
+  if (target === freeWindowToggle) {
+    setLayout(freeWindowToggle.checked ? 'free' : state.lastPresetLayout);
+    return;
+  }
   if (target.matches('[data-select-room]')) {
     const roomId = target.closest<HTMLElement>('[data-room]')?.dataset.room ?? '';
     if ((target as HTMLInputElement).checked) state.selectedRooms.add(roomId);
@@ -1345,57 +1899,118 @@ app.addEventListener('change', (event) => {
   }
 });
 
-app.addEventListener('dragstart', (event) => {
-  const card = (event.target as HTMLElement).closest<HTMLElement>('.stream-card');
-  if (!card || !event.dataTransfer) return;
-  event.dataTransfer.setData('text/plain', card.dataset.room ?? '');
-  event.dataTransfer.effectAllowed = 'move';
-  card.classList.add('is-dragging');
+interface WindowInteraction {
+  pointerId: number;
+  target: HTMLElement;
+  card: HTMLElement;
+  roomId: string;
+  mode: 'move' | 'resize';
+  direction: string;
+  startX: number;
+  startY: number;
+  startRect: StreamWindowRect;
+}
+
+let windowInteraction: WindowInteraction | null = null;
+
+app.addEventListener('pointerdown', (event) => {
+  const target = event.target as HTMLElement;
+  const card = target.closest<HTMLElement>('.stream-card');
+  if (!card) return;
+  bringWindowToFront(card);
+  const roomId = card.dataset.room ?? '';
+  if (roomId && state.activeRoom !== roomId) {
+    state.activeRoom = roomId;
+    videoGrid.querySelectorAll<HTMLElement>('.stream-card').forEach((candidate) => {
+      candidate.classList.toggle('is-active', candidate === card);
+    });
+    renderRoomList();
+    renderInspector();
+  }
+
+  const resizeHandle = target.closest<HTMLElement>('[data-resize]');
+  const moveHandle = target.closest<HTMLElement>('.drag-handle');
+  const interactionTarget = resizeHandle ?? moveHandle;
+  if (!interactionTarget || !roomId || state.layout !== 'free') return;
+
+  event.preventDefault();
+  interactionTarget.setPointerCapture(event.pointerId);
+  const startRect = state.windowRects[roomId] ?? defaultWindowRect(state.openRooms.indexOf(roomId));
+  windowInteraction = {
+    pointerId: event.pointerId,
+    target: interactionTarget,
+    card,
+    roomId,
+    mode: resizeHandle ? 'resize' : 'move',
+    direction: resizeHandle?.dataset.resize ?? '',
+    startX: event.clientX,
+    startY: event.clientY,
+    startRect: { ...startRect },
+  };
+  card.classList.add(resizeHandle ? 'is-resizing' : 'is-moving');
 });
 
-app.addEventListener('dragend', (event) => {
-  (event.target as HTMLElement).closest<HTMLElement>('.stream-card')?.classList.remove('is-dragging');
+app.addEventListener('pointermove', (event) => {
+  const interaction = windowInteraction;
+  if (!interaction || interaction.pointerId !== event.pointerId) return;
+  const deltaX = event.clientX - interaction.startX;
+  const deltaY = event.clientY - interaction.startY;
+  const next = { ...interaction.startRect };
+  if (interaction.mode === 'move') {
+    next.x += deltaX;
+    next.y += deltaY;
+  } else {
+    if (interaction.direction.includes('e')) next.width += deltaX;
+    if (interaction.direction.includes('s')) next.height += deltaY;
+    if (interaction.direction.includes('w')) {
+      next.x += deltaX;
+      next.width -= deltaX;
+    }
+    if (interaction.direction.includes('n')) {
+      next.y += deltaY;
+      next.height -= deltaY;
+    }
+  }
+  applyWindowRect(interaction.card, interaction.roomId, next);
 });
+
+function finishWindowInteraction(event: PointerEvent): void {
+  const interaction = windowInteraction;
+  if (!interaction || interaction.pointerId !== event.pointerId) return;
+  interaction.card.classList.remove('is-moving', 'is-resizing');
+  if (interaction.target.hasPointerCapture(event.pointerId)) interaction.target.releasePointerCapture(event.pointerId);
+  windowInteraction = null;
+  savePreferences();
+}
+
+app.addEventListener('pointerup', finishWindowInteraction);
+app.addEventListener('pointercancel', finishWindowInteraction);
 
 app.addEventListener('keydown', (event) => {
   const handle = (event.target as HTMLElement).closest<HTMLButtonElement>('.drag-handle');
-  if (!handle || !['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+  if (!handle || state.layout !== 'free' || !['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) return;
 
   event.preventDefault();
   const card = handle.closest<HTMLElement>('.stream-card');
   const roomId = card?.dataset.room ?? '';
-  const currentIndex = state.openRooms.indexOf(roomId);
-  const direction = event.key === 'ArrowUp' || event.key === 'ArrowLeft' ? -1 : 1;
-  const nextIndex = Math.max(0, Math.min(state.openRooms.length - 1, currentIndex + direction));
-  if (currentIndex < 0 || currentIndex === nextIndex) return;
-
-  const currentRoomId = state.openRooms[currentIndex]!;
-  state.openRooms[currentIndex] = state.openRooms[nextIndex]!;
-  state.openRooms[nextIndex] = currentRoomId;
+  if (!card || !roomId) return;
+  const step = event.shiftKey ? 40 : 10;
+  const rect = { ...(state.windowRects[roomId] ?? defaultWindowRect(state.openRooms.indexOf(roomId))) };
+  if (event.altKey) {
+    if (event.key === 'ArrowLeft') rect.width -= step;
+    if (event.key === 'ArrowRight') rect.width += step;
+    if (event.key === 'ArrowUp') rect.height -= step;
+    if (event.key === 'ArrowDown') rect.height += step;
+  } else {
+    if (event.key === 'ArrowLeft') rect.x -= step;
+    if (event.key === 'ArrowRight') rect.x += step;
+    if (event.key === 'ArrowUp') rect.y -= step;
+    if (event.key === 'ArrowDown') rect.y += step;
+  }
+  applyWindowRect(card, roomId, rect);
+  bringWindowToFront(card);
   savePreferences();
-  renderCanvas();
-  card?.querySelector<HTMLButtonElement>('.drag-handle')?.focus();
-  toast(`已将 ${displayRoomName(roomById(roomId), roomId)} 移动到第 ${nextIndex + 1} 位`);
-});
-
-videoGrid.addEventListener('dragover', (event) => {
-  event.preventDefault();
-  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
-});
-
-videoGrid.addEventListener('drop', (event) => {
-  event.preventDefault();
-  const sourceId = event.dataTransfer?.getData('text/plain') ?? '';
-  const target = (event.target as HTMLElement).closest<HTMLElement>('.stream-card');
-  const targetId = target?.dataset.room ?? '';
-  if (!sourceId || !targetId || sourceId === targetId) return;
-  const sourceIndex = state.openRooms.indexOf(sourceId);
-  const targetIndex = state.openRooms.indexOf(targetId);
-  if (sourceIndex < 0 || targetIndex < 0) return;
-  state.openRooms.splice(sourceIndex, 1);
-  state.openRooms.splice(targetIndex, 0, sourceId);
-  savePreferences();
-  renderCanvas();
+  toast(event.altKey ? '已调整窗口大小' : '已移动窗口');
 });
 
 roomSearch.addEventListener('input', () => {
@@ -1429,8 +2044,9 @@ addRoomForm.addEventListener('submit', (event) => {
 });
 
 element<HTMLButtonElement>('command-button').addEventListener('click', openCommandDialog);
-element<HTMLButtonElement>('room-drawer-button').addEventListener('click', () => document.body.classList.add('room-drawer-open'));
-element<HTMLButtonElement>('inspector-button').addEventListener('click', () => document.body.classList.toggle('inspector-open'));
+element<HTMLButtonElement>('queue-panel-button').addEventListener('click', toggleQueuePanel);
+element<HTMLButtonElement>('room-drawer-button').addEventListener('click', toggleQueuePanel);
+element<HTMLButtonElement>('inspector-button').addEventListener('click', toggleInspectorPanel);
 element<HTMLButtonElement>('confirm-remove').addEventListener('click', () => void confirmRemoval());
 commandInput.addEventListener('input', () => renderCommands(commandInput.value));
 commandInput.addEventListener('keydown', (event) => {
@@ -1453,9 +2069,10 @@ commandInput.addEventListener('keydown', (event) => {
 });
 
 videoGrid.addEventListener('dblclick', (event) => {
-  const video = (event.target as HTMLElement).closest<HTMLElement>('.stream-card')?.querySelector<HTMLVideoElement>('video');
-  if (!video) return;
-  void video.requestFullscreen().catch(() => toast('当前环境无法进入全屏', 'error'));
+  const target = event.target as HTMLElement;
+  if (target.closest('button, select')) return;
+  const roomId = target.closest<HTMLElement>('.stream-card')?.dataset.room;
+  if (roomId) fullscreenRoom(roomId);
 });
 
 analyticsBody.addEventListener('click', (event) => {
@@ -1486,7 +2103,7 @@ document.addEventListener('keydown', (event) => {
     else openCommandDialog();
     return;
   }
-  if (isTyping || commandDialog.open || confirmDialog.open) return;
+  if (isTyping || commandDialog.open || confirmDialog.open || danmakuSettingsDialog.open) return;
   if (event.key === '/') {
     event.preventDefault();
     roomSearch.focus();
@@ -1514,6 +2131,35 @@ window.addEventListener('beforeunload', () => {
   players.forEach((player) => player.destroy());
 });
 
+desktopQueueMedia.addEventListener('change', () => {
+  document.body.classList.remove('room-drawer-open');
+  applyPanelVisibility();
+  constrainAllWindows();
+});
+
+desktopInspectorMedia.addEventListener('change', () => {
+  document.body.classList.remove('inspector-open');
+  applyPanelVisibility();
+  constrainAllWindows();
+});
+
+new ResizeObserver(() => constrainAllWindows()).observe(videoGrid);
+
+danmakuOpacityInput.addEventListener('input', () => {
+  state.danmakuOpacity = Number(danmakuOpacityInput.value);
+  applyDanmakuDisplaySettings(true);
+});
+
+danmakuFontSizeInput.addEventListener('input', () => {
+  state.danmakuFontSize = Number(danmakuFontSizeInput.value);
+  applyDanmakuDisplaySettings(true);
+});
+
+danmakuAreaSelect.addEventListener('change', () => {
+  state.danmakuArea = danmakuAreaSelect.value as DanmakuArea;
+  applyDanmakuDisplaySettings(true);
+});
+
 window.setInterval(() => {
   document.querySelectorAll<HTMLElement>('.stream-card').forEach((card) => {
     const room = roomById(card.dataset.room ?? '');
@@ -1534,7 +2180,9 @@ window.setInterval(() => {
   }
 }, 5000);
 
+applyDanmakuDisplaySettings();
 drawIcons();
+applyPanelVisibility();
 renderAll();
 void loadRooms();
 void checkService();

@@ -42,10 +42,10 @@ pnpm desktop:pack
 安装包输出到：
 
 ```text
-release/LiveGrid-0.1.2-setup.exe
+release/LiveGrid-0.1.4-setup.exe
 ```
 
-安装程序默认使用 `%LOCALAPPDATA%\Programs\监控室`。用户在安装向导中选择其他父目录时，`build/installer.nsh` 会自动追加独立的 `监控室` 子目录。安装后的主程序文件名为 `LiveGrid.exe`。
+安装程序默认使用 `%LOCALAPPDATA%\Programs\监控室`。用户在安装向导中选择其他父目录时，`build/installer.nsh` 会自动追加独立的 `监控室` 子目录。`scripts/configure-nsis-compressor.cjs` 会让 NSIS 直接向目标目录释放应用文件，避免大型中间归档占用系统 `%TEMP%`。安装后的主程序文件名为 `LiveGrid.exe`。
 
 需要便携单文件时可执行：
 

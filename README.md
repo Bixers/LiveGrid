@@ -6,7 +6,8 @@ LiveGrid 是一套本地直播监控工作台，中文产品名为“监控室�
 
 ## 下载
 
-- [下载 LiveGrid 0.1.2 Windows x64 安装包](https://github.com/Bixers/LiveGrid/releases/download/v0.1.2/LiveGrid-0.1.2-setup.exe)
+- 当前源码版本：`0.1.4`
+- [下载已发布的 LiveGrid 0.1.2 Windows x64 安装包](https://github.com/Bixers/LiveGrid/releases/download/v0.1.2/LiveGrid-0.1.2-setup.exe)
 - SHA-256：`7E7A70239B2A4DF09C01D8F4C034CEF0CFC414019254215137BFA4D5BCBEABE7`
 
 安装包暂未配置代码签名证书，Windows 可能显示“未知发布者”。
@@ -44,11 +45,11 @@ pnpm build
 pnpm desktop:pack
 ```
 
-成品输出到 `release/LiveGrid-0.1.2-setup.exe`。默认安装到 `%LOCALAPPDATA%\Programs\监控室`；选择其他父目录时，安装器会自动补上独立的 `监控室` 子目录。安装后直接运行 `LiveGrid.exe`，不再像单文件便携版一样每次解压约 455 MB 的 Electron 运行时。
+成品输出到 `release/LiveGrid-0.1.4-setup.exe`。默认安装到 `%LOCALAPPDATA%\Programs\监控室`；选择其他父目录时，安装器会自动补上独立的 `监控室` 子目录。安装器将文件直接释放到目标目录，不再先把大型 `app-64.7z` 写入系统临时目录。安装后直接运行 `LiveGrid.exe`，不再像单文件便携版一样每次解压约 455 MB 的 Electron 运行时。
 
 仍需便携单文件时可执行 `pnpm desktop:pack:portable`，但未签名环境下每次启动都可能因临时解压和安全扫描出现较长等待。
 
-首次启动会把随包后端复制到 `%APPDATA%\监控室\backend`，并自动迁移旧版的房间列表和代理配置。桌面启动日志位于 `%APPDATA%\监控室\desktop.log`。
+首次启动会把随包后端复制到安装目录的 `runtime\backend`，PyInstaller 临时运行库位于同盘的 `runtime\pyi-temp`，并自动迁移旧版的房间列表和代理配置。桌面启动日志位于 `%APPDATA%\监控室\desktop.log`。
 
 当前本地构建未配置代码签名证书，Windows 可能显示“未知发布者”。正式分发前应使用受信任证书签名。
 
@@ -58,8 +59,9 @@ pnpm desktop:pack
 
 - 直播监控与运行数据双视图，桌面三栏上下文和窄屏抽屉布局。
 - 房间搜索、状态筛选、关注优先、多选和批量打开/静音/移除。
-- 自动、1/2/3/4 列和重点画面布局，支持拖动排序与键盘方向键排序。
-- 清晰度切换、单路/全部静音、手动刷新、双击视频全屏。
+- 自由窗口开关，以及自动、1/2/3/4 列和重点画面布局；自由模式支持拖动、八向缩放和键盘调整。
+- 清晰度切换、紧凑播放控制、单路/全部静音、手动刷新、双击视频全屏。
+- 弹幕可逐路开关，并可统一调整透明度、字号和顶部/底部显示区域。
 - 本地保存已打开房间、关注、静音和布局偏好。
 - 本地服务健康、请求延迟、空状态、失败状态和恢复反馈。
 - 弹幕 SSE 事件检查器与 `/api/stats` 运行数据表。

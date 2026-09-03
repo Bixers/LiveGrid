@@ -1,5 +1,6 @@
 export type Quality = 'OD' | 'UHD' | 'HD' | 'SD';
-export type LayoutMode = 'auto' | '1' | '2' | '3' | '4' | 'focus';
+export type LayoutMode = 'free' | 'auto' | '1' | '2' | '3' | '4' | 'focus';
+export type DanmakuArea = 'top-quarter' | 'top-third' | 'top-half' | 'full' | 'bottom-half' | 'bottom-quarter';
 export type RoomFilter = 'all' | 'live' | 'offline';
 export type AppView = 'monitor' | 'analytics';
 
@@ -65,13 +66,28 @@ export interface LiveEvent {
   count?: number;
   gfcnt?: number;
   value?: number;
+  col?: string | number;
   time?: number | string;
   ok?: boolean;
+}
+
+export interface StreamWindowRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 export interface Preferences {
   openRooms: string[];
   favorites: string[];
   mutedRooms: string[];
+  danmakuHiddenRooms: string[];
+  danmakuOpacity: number;
+  danmakuFontSize: number;
+  danmakuArea: DanmakuArea;
   layout: LayoutMode;
+  windowRects: Record<string, StreamWindowRect>;
+  queueCollapsed: boolean;
+  inspectorCollapsed: boolean;
 }

@@ -2,7 +2,7 @@
   "name": "livegrid",
   "productName": "监控室",
   "private": true,
-  "version": "0.1.2",
+  "version": "0.1.4",
   "type": "module",
   "main": "electron/main.cjs",
   "packageManager": "pnpm@11.19.0",
@@ -15,8 +15,8 @@
     "preview": "vite preview --host 127.0.0.1",
     "check": "tsc --noEmit",
     "desktop:smoke": "pnpm build && electron .",
-    "desktop:pack": "pnpm build && electron-builder --win nsis --x64",
-    "desktop:pack:portable": "pnpm build && electron-builder --win portable --x64"
+    "desktop:pack": "pnpm build && node scripts/configure-nsis-compressor.cjs direct && electron-builder --win nsis --x64",
+    "desktop:pack:portable": "pnpm build && node scripts/configure-nsis-compressor.cjs archive && electron-builder --win portable --x64"
   },
   "dependencies": {
     "hls.js": "1.7.2",
