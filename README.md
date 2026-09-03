@@ -6,9 +6,9 @@ LiveGrid 是一套本地直播监控工作台，中文产品名为“监控室�
 
 ## 下载
 
-- 当前源码版本：`0.1.4`
-- [下载已发布的 LiveGrid 0.1.2 Windows x64 安装包](https://github.com/Bixers/LiveGrid/releases/download/v0.1.2/LiveGrid-0.1.2-setup.exe)
-- SHA-256：`7E7A70239B2A4DF09C01D8F4C034CEF0CFC414019254215137BFA4D5BCBEABE7`
+- 当前版本：`0.1.4`
+- [下载 LiveGrid 0.1.4 Windows x64 安装包](https://github.com/Bixers/LiveGrid/releases/download/v0.1.4/LiveGrid-0.1.4-setup.exe)
+- SHA-256：`EEF7BE14AA83CD917CD78BEECA1D007BA99BB9C92E759AA78E3E2FE4124CED96`
 
 安装包暂未配置代码签名证书，Windows 可能显示“未知发布者”。
 
