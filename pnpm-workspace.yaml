@@ -1,0 +1,7 @@
+allowBuilds:
+  electron: true
+  electron-winstaller: true
+minimumReleaseAgeExclude:
+  - hls.js@1.7.2
+overrides:
+  '@electron/get': 5.1.0

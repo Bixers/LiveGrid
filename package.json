@@ -1,0 +1,85 @@
+{
+  "name": "livegrid",
+  "productName": "监控室",
+  "private": true,
+  "version": "0.1.2",
+  "type": "module",
+  "main": "electron/main.cjs",
+  "packageManager": "pnpm@11.19.0",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "check": "tsc --noEmit",
+    "desktop:smoke": "pnpm build && electron .",
+    "desktop:pack": "pnpm build && electron-builder --win nsis --x64",
+    "desktop:pack:portable": "pnpm build && electron-builder --win portable --x64"
+  },
+  "dependencies": {
+    "hls.js": "1.7.2",
+    "lucide": "1.39.0",
+    "mpegts.js": "1.8.2"
+  },
+  "devDependencies": {
+    "electron": "44.1.1",
+    "electron-builder": "26.15.3",
+    "typescript": "5.9.3",
+    "vite": "8.2.2"
+  },
+  "build": {
+    "appId": "local.livegrid.app",
+    "productName": "监控室",
+    "electronDist": "node_modules/electron/dist",
+    "asar": true,
+    "compression": "maximum",
+    "npmRebuild": false,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "build/icon.ico",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "desktop-backend",
+        "to": "backend",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "executableName": "LiveGrid",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "artifactName": "LiveGrid-${version}-setup.${ext}",
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "监控室",
+      "runAfterFinish": true,
+      "deleteAppDataOnUninstall": false
+    },
+    "portable": {
+      "artifactName": "LiveGrid-${version}-portable.${ext}"
+    }
+  }
+}
