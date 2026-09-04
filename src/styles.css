@@ -1019,6 +1019,7 @@ button.is-busy svg {
   contain: layout paint;
   transition: border-color 160ms ease, box-shadow 160ms ease;
   will-change: transform;
+  container-type: inline-size;
 }
 
 .stream-card:hover {
@@ -1042,14 +1043,40 @@ button.is-busy svg {
   position: relative;
   z-index: 10;
   display: flex;
-  flex: 0 0 38px;
+  flex: 0 0 0;
   align-items: center;
   gap: 5px;
+  height: 0;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+  color: var(--ink);
+  background: rgb(255 255 255 / 0.97);
+  border-bottom: 1px solid #ced6e0;
+  box-shadow: 0 4px 12px rgb(9 20 36 / 0.13);
+  opacity: 0;
+  pointer-events: none;
+  transition: flex-basis 150ms ease, height 150ms ease, opacity 120ms ease;
+}
+
+.stream-chrome-trigger {
+  position: relative;
+  z-index: 9;
+  flex: 0 0 5px;
+  height: 5px;
+  cursor: default;
+}
+
+.stream-chrome-trigger:hover + .stream-chrome,
+.stream-chrome:hover,
+.stream-chrome:focus-within,
+.stream-card.is-moving .stream-chrome,
+.stream-card.is-resizing .stream-chrome {
+  flex-basis: 38px;
   height: 38px;
   padding: 0 6px;
-  color: var(--ink);
-  background: #ffffff;
-  border-bottom: 1px solid #ced6e0;
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .drag-handle {
@@ -1113,6 +1140,43 @@ button.is-busy svg {
   white-space: nowrap;
 }
 
+.stream-revenue {
+  display: inline-flex;
+  min-width: 94px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 3px;
+  color: #17653f;
+  font-family: Bahnschrift, "Segoe UI", sans-serif;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.stream-revenue svg {
+  width: 13px;
+  height: 13px;
+  color: #21885a;
+}
+
+@container (max-width: 560px) {
+  .stream-title small,
+  .stream-duration {
+    display: none;
+  }
+
+  .stream-revenue {
+    min-width: 82px;
+    font-size: 9px;
+  }
+}
+
+@container (max-width: 420px) {
+  .quality-select select {
+    width: 52px;
+  }
+}
+
 .quality-select,
 .select-field {
   position: relative;
@@ -1144,18 +1208,20 @@ button.is-busy svg {
 
 .video-frame {
   position: relative;
+  display: flex;
   flex: 1;
+  flex-direction: column;
   min-height: 0;
   overflow: hidden;
   background: var(--media);
 }
 
-.video-frame video {
+.native-player-surface {
   display: block;
+  flex: 1 1 auto;
   width: 100%;
-  height: 100%;
+  min-height: 0;
   background: var(--media);
-  object-fit: contain;
 }
 
 .danmaku-button.is-active {
@@ -1179,31 +1245,24 @@ button.is-busy svg {
 }
 
 .video-controls {
-  position: absolute;
-  bottom: 8px;
-  left: 50%;
+  position: relative;
   z-index: 7;
   display: flex;
+  flex: 0 0 36px;
   align-items: center;
-  width: min(290px, calc(100% - 16px));
-  height: 34px;
-  padding: 2px 4px;
+  width: 100%;
+  height: 36px;
+  padding: 2px 7px;
   color: #f5f8fc;
   background: rgb(9 14 22 / 0.88);
-  border: 1px solid rgb(192 204 222 / 0.25);
-  border-radius: 4px;
-  opacity: 0;
-  pointer-events: none;
-  transform: translate(-50%, 4px);
-  transition: opacity 140ms ease, transform 140ms ease;
+  border: 0;
+  border-top: 1px solid rgb(192 204 222 / 0.25);
+  border-radius: 0;
 }
 
-.stream-card.has-stream .video-frame:hover .video-controls,
-.stream-card.has-stream .video-controls:focus-within,
-.stream-card.has-stream.is-paused .video-controls {
-  opacity: 1;
-  pointer-events: auto;
-  transform: translate(-50%, 0);
+.stream-card:not(.has-stream) .video-controls {
+  color: #8994a5;
+  background: #18202c;
 }
 
 .media-control-button {
@@ -1235,6 +1294,41 @@ button.is-busy svg {
   height: 15px;
 }
 
+.media-quality-select {
+  position: relative;
+  display: block;
+  flex: 0 0 auto;
+}
+
+.media-quality-select select {
+  width: 62px;
+  height: 28px;
+  padding: 0 21px 0 7px;
+  color: #f5f8fc;
+  background: #18202c;
+  border: 1px solid #465268;
+  border-radius: 3px;
+  font-size: 10px;
+  appearance: none;
+}
+
+.media-quality-select select:hover,
+.media-quality-select select:focus-visible {
+  background: #253044;
+  border-color: #7fa5ff;
+}
+
+.media-quality-select > svg {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  width: 13px;
+  height: 13px;
+  color: #c9d3e1;
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
 .media-mute-button.is-active {
   color: #ff8b93;
 }
@@ -1260,43 +1354,35 @@ button.is-busy svg {
   flex: 1;
 }
 
-.danmaku-layer {
-  position: absolute;
-  top: 0;
-  right: 0;
-  left: 0;
-  z-index: 3;
-  height: 34%;
-  overflow: hidden;
-  opacity: var(--danmaku-opacity, 0.92);
-  pointer-events: none;
-  user-select: none;
+.media-volume-control {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
 }
 
-.video-grid[data-danmaku-area="top-quarter"] .danmaku-layer { top: 0; height: 25%; }
-.video-grid[data-danmaku-area="top-third"] .danmaku-layer { top: 0; height: 34%; }
-.video-grid[data-danmaku-area="top-half"] .danmaku-layer { top: 0; height: 50%; }
-.video-grid[data-danmaku-area="full"] .danmaku-layer { top: 0; height: 100%; }
-.video-grid[data-danmaku-area="bottom-half"] .danmaku-layer { top: 50%; height: 50%; }
-.video-grid[data-danmaku-area="bottom-quarter"] .danmaku-layer { top: 75%; height: 25%; }
+.media-volume-control input[type="range"] {
+  width: clamp(52px, 14vw, 92px);
+  height: 22px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  accent-color: #7fa5ff;
+  cursor: pointer;
+}
 
-.danmaku-item {
-  position: absolute;
-  left: 0;
-  max-width: max-content;
-  color: #ffffff;
-  font-size: var(--danmaku-font-size, 14px);
-  font-weight: 650;
-  line-height: 1.35;
-  white-space: nowrap;
-  opacity: 0.92;
-  text-shadow: 0 1px 2px #000000, 1px 0 1px #000000, -1px 0 1px #000000;
-  will-change: transform;
+.media-volume-control output {
+  width: 31px;
+  color: #d8e0eb;
+  font-family: Bahnschrift, "Segoe UI", sans-serif;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
 .resize-handle {
   position: absolute;
-  z-index: 8;
+  z-index: 12;
   pointer-events: none;
   touch-action: none;
 }
@@ -1394,6 +1480,7 @@ button.is-busy svg {
   font-size: 10px;
   font-weight: 700;
   text-align: center;
+  transition: top 150ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .stream-state-tag[data-state="live"] {
@@ -1733,6 +1820,32 @@ button.is-busy svg {
   margin-top: 8px;
 }
 
+.inspector-volume-control {
+  margin-top: 12px;
+}
+
+.inspector-volume-control .field-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.inspector-volume-control output {
+  color: var(--ink);
+  font-family: Bahnschrift, "Segoe UI", sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+
+.inspector-volume-control input[type="range"] {
+  width: 100%;
+  height: 24px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
 .remove-room-button {
   display: flex;
   align-items: center;
@@ -1768,6 +1881,45 @@ button.is-busy svg {
 .section-heading span {
   color: var(--ink-faint);
   font-size: 10px;
+}
+
+.event-tabs {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  align-items: end;
+  gap: 2px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.event-tabs button {
+  min-width: 54px;
+  height: 30px;
+  padding: 0 8px;
+  color: var(--ink-muted);
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  font-size: 11px;
+}
+
+.event-tabs button:hover {
+  color: var(--ink);
+  background: var(--surface-hover);
+}
+
+.event-tabs button.is-active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: 700;
+}
+
+.event-tabs > span {
+  padding: 0 2px 7px;
+  color: var(--ink-faint);
+  font-size: 10px;
+  text-align: right;
 }
 
 .event-list {
@@ -1994,6 +2146,17 @@ dialog::backdrop {
   border: 1px solid var(--line-strong);
   border-radius: var(--radius);
   font-size: 11px;
+}
+
+.gift-revenue-field {
+  border-bottom: 0;
+}
+
+.settings-group-label {
+  padding: 8px 0 3px;
+  color: var(--ink-faint);
+  font-size: 10px;
+  font-weight: 700;
 }
 
 .danmaku-settings-dialog .dialog-actions {
@@ -2367,6 +2530,21 @@ dialog::backdrop {
   .room-panel {
     width: min(300px, 92vw);
   }
+}
+
+@media (hover: none) {
+  .stream-chrome {
+    flex-basis: 38px;
+    height: 38px;
+    padding: 0 6px;
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .stream-state-tag {
+    top: 46px;
+  }
+
 }
 
 @media (prefers-reduced-motion: reduce) {

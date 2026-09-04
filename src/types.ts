@@ -1,6 +1,7 @@
 export type Quality = 'OD' | 'UHD' | 'HD' | 'SD';
 export type LayoutMode = 'free' | 'auto' | '1' | '2' | '3' | '4' | 'focus';
 export type DanmakuArea = 'top-quarter' | 'top-third' | 'top-half' | 'full' | 'bottom-half' | 'bottom-quarter';
+export type GiftRevenueRange = 'today' | '7d' | 'session';
 export type RoomFilter = 'all' | 'live' | 'offline';
 export type AppView = 'monitor' | 'analytics';
 
@@ -41,16 +42,26 @@ export interface StatsRoom {
   live?: boolean;
   hot?: number;
   fans?: number;
-  noble?: number;
   giftTotal?: number;
+  giftPaid?: number;
   giftUV?: number;
   chatUV?: number;
   activeUV?: number;
   sr?: number;
+  gifts?: LiveEvent[];
 }
 
 export interface StatsResponse {
   rooms?: StatsRoom[];
+}
+
+export interface RoomTrendResponse {
+  agg?: {
+    '7d'?: {
+      lw?: number;
+      sr?: number;
+    };
+  };
 }
 
 export interface LiveEvent {
@@ -63,9 +74,13 @@ export interface LiveEvent {
   txt?: string;
   giftName?: string;
   gfname?: string;
+  giftCount?: number;
+  giftPrice?: number;
+  totalValue?: number;
+  sender?: string;
+  receiver?: string;
   count?: number;
   gfcnt?: number;
-  value?: number;
   col?: string | number;
   time?: number | string;
   ok?: boolean;
@@ -78,14 +93,23 @@ export interface StreamWindowRect {
   height: number;
 }
 
+export interface GiftSessionSnapshot {
+  showTime: number;
+  totalCents: number;
+}
+
 export interface Preferences {
   openRooms: string[];
   favorites: string[];
   mutedRooms: string[];
+  roomVolumes: Record<string, number>;
   danmakuHiddenRooms: string[];
   danmakuOpacity: number;
   danmakuFontSize: number;
   danmakuArea: DanmakuArea;
+  giftRevenueRange: GiftRevenueRange;
+  includeFreeGifts: boolean;
+  giftSessionTotals: Record<string, GiftSessionSnapshot>;
   layout: LayoutMode;
   windowRects: Record<string, StreamWindowRect>;
   queueCollapsed: boolean;

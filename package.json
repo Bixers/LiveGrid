@@ -2,7 +2,7 @@
   "name": "livegrid",
   "productName": "监控室",
   "private": true,
-  "version": "0.1.4",
+  "version": "0.1.8",
   "type": "module",
   "main": "electron/main.cjs",
   "packageManager": "pnpm@11.19.0",
@@ -11,21 +11,19 @@
   },
   "scripts": {
     "dev": "vite --host 127.0.0.1",
+    "native:prepare": "powershell -NoProfile -ExecutionPolicy Bypass -File native-player/prepare-libmpv.ps1",
+    "native:build": "powershell -NoProfile -ExecutionPolicy Bypass -File native-player/build.ps1",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 127.0.0.1",
     "check": "tsc --noEmit",
-    "desktop:smoke": "pnpm build && electron .",
-    "desktop:pack": "pnpm build && node scripts/configure-nsis-compressor.cjs direct && electron-builder --win nsis --x64",
-    "desktop:pack:portable": "pnpm build && node scripts/configure-nsis-compressor.cjs archive && electron-builder --win portable --x64"
-  },
-  "dependencies": {
-    "hls.js": "1.7.2",
-    "lucide": "1.39.0",
-    "mpegts.js": "1.8.2"
+    "desktop:smoke": "pnpm native:build && pnpm build && electron .",
+    "desktop:pack": "pnpm native:build && pnpm build && node scripts/configure-nsis-compressor.cjs direct && electron-builder --win nsis --x64",
+    "desktop:pack:portable": "pnpm native:build && pnpm build && node scripts/configure-nsis-compressor.cjs archive && electron-builder --win portable --x64"
   },
   "devDependencies": {
     "electron": "44.1.1",
     "electron-builder": "26.15.3",
+    "lucide": "1.39.0",
     "typescript": "5.9.3",
     "vite": "8.2.2"
   },
@@ -43,6 +41,7 @@
       "dist/**/*",
       "electron/**/*",
       "build/icon.ico",
+      "THIRD_PARTY_NOTICES.md",
       "package.json"
     ],
     "extraResources": [
@@ -51,6 +50,14 @@
         "to": "backend",
         "filter": [
           "**/*"
+        ]
+      },
+      {
+        "from": "native-player/runtime",
+        "to": "native-player",
+        "filter": [
+          "LiveGrid.PlayerHost.exe",
+          "libmpv-2.dll"
         ]
       }
     ],

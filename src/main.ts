@@ -4,6 +4,7 @@ import {
   Check,
   ChevronDown,
   CircleAlert,
+  CircleDollarSign,
   Command,
   Focus,
   GripVertical,
@@ -36,6 +37,7 @@ import {
 import {
   addRoom as addRoomRequest,
   getLastLatency,
+  getRoomTrend,
   getServiceStatus,
   getStats,
   getStreams,
@@ -43,10 +45,17 @@ import {
   removeRoom as removeRoomRequest,
   setRoomQuality,
 } from './api';
-import { StreamPlayer, type PlayerState } from './player';
+import {
+  StreamPlayer,
+  subscribeNativePlayerEvents,
+  type NativePlayerEvent,
+  type PlayerState,
+} from './player';
 import type {
   AppView,
   DanmakuArea,
+  GiftRevenueRange,
+  GiftSessionSnapshot,
   LayoutMode,
   LiveEvent,
   Preferences,
@@ -58,12 +67,22 @@ import type {
 } from './types';
 import './styles.css';
 
+declare global {
+  interface Window {
+    liveGridPreferences?: {
+      read: () => unknown;
+      write: (value: unknown) => void;
+    };
+  }
+}
+
 const iconSet: Record<string, IconNode> = {
   activity: Activity,
   'bar-chart-3': BarChart3,
   check: Check,
   'chevron-down': ChevronDown,
   'circle-alert': CircleAlert,
+  'circle-dollar-sign': CircleDollarSign,
   command: Command,
   focus: Focus,
   'grip-vertical': GripVertical,
@@ -97,6 +116,7 @@ if (!app) throw new Error('应用挂载节点不存在');
 
 const demoMode = new URLSearchParams(window.location.search).get('demo') === '1';
 const storageKey = demoMode ? 'live_ops_preferences_demo_v1' : 'live_ops_preferences_v1';
+const desktopPreferences = demoMode ? undefined : window.liveGridPreferences;
 const qualityNames: Record<Quality, string> = {
   OD: '原画',
   UHD: '超清',
@@ -113,20 +133,24 @@ const demoRooms: StreamRoom[] = [
 ];
 
 const demoStats: StatsRoom[] = [
-  { rid: '612904', name: '夜航电竞', live: true, hot: 32741, fans: 184206, noble: 37, giftTotal: 287340, giftUV: 214, chatUV: 1638, activeUV: 4821, sr: 641 },
-  { rid: '883120', name: '山城音乐间', live: true, hot: 21806, fans: 92713, noble: 19, giftTotal: 149680, giftUV: 127, chatUV: 906, activeUV: 2914, sr: 382 },
-  { rid: '390271', name: '橙子电台', live: true, hot: 12639, fans: 60388, noble: 8, giftTotal: 68320, giftUV: 71, chatUV: 517, activeUV: 1736, sr: 195 },
-  { rid: '721536', name: '北岸户外', live: false, hot: 0, fans: 43107, noble: 0, giftTotal: 0, giftUV: 0, chatUV: 0, activeUV: 0, sr: 0 },
+  { rid: '612904', name: '夜航电竞', live: true, hot: 32741, fans: 184206, giftTotal: 2873.4, giftPaid: 641, giftUV: 214, chatUV: 1638, activeUV: 4821, sr: 641 },
+  { rid: '883120', name: '山城音乐间', live: true, hot: 21806, fans: 92713, giftTotal: 1496.8, giftPaid: 382, giftUV: 127, chatUV: 906, activeUV: 2914, sr: 382 },
+  { rid: '390271', name: '橙子电台', live: true, hot: 12639, fans: 60388, giftTotal: 683.2, giftPaid: 195, giftUV: 71, chatUV: 517, activeUV: 1736, sr: 195 },
+  { rid: '721536', name: '北岸户外', live: false, hot: 0, fans: 43107, giftTotal: 0, giftPaid: 0, giftUV: 0, chatUV: 0, activeUV: 0, sr: 0 },
 ];
 
 const defaultPreferences: Preferences = {
   openRooms: demoMode ? demoRooms.slice(0, 3).map((room) => room.room) : [],
   favorites: [],
   mutedRooms: [],
+  roomVolumes: {},
   danmakuHiddenRooms: [],
   danmakuOpacity: 92,
   danmakuFontSize: 14,
   danmakuArea: 'top-third',
+  giftRevenueRange: 'today',
+  includeFreeGifts: true,
+  giftSessionTotals: {},
   layout: 'auto',
   windowRects: {},
   queueCollapsed: false,
@@ -148,6 +172,28 @@ function readWindowRects(value: unknown): Record<string, StreamWindowRect> {
   }));
 }
 
+function readRoomVolumes(value: unknown): Record<string, number> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value).flatMap(([roomId, candidate]) => {
+    const volume = Number(candidate);
+    if (!Number.isFinite(volume)) return [];
+    return [[roomId, Math.round(Math.min(100, Math.max(0, volume)))]];
+  }));
+}
+
+function readGiftSessionTotals(value: unknown): Record<string, GiftSessionSnapshot> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value).flatMap(([roomId, candidate]) => {
+    if (!candidate || typeof candidate !== 'object') return [];
+    const snapshot = candidate as Partial<GiftSessionSnapshot>;
+    if (!Number.isFinite(snapshot.showTime) || !Number.isFinite(snapshot.totalCents)) return [];
+    return [[roomId, {
+      showTime: Math.max(0, Number(snapshot.showTime)),
+      totalCents: Math.max(0, Number(snapshot.totalCents)),
+    }]];
+  }));
+}
+
 function readNumberPreference(value: unknown, fallback: number, minimum: number, maximum: number): number {
   const number = Number(value);
   return Number.isFinite(number) ? Math.min(maximum, Math.max(minimum, number)) : fallback;
@@ -155,17 +201,26 @@ function readNumberPreference(value: unknown, fallback: number, minimum: number,
 
 function readPreferences(): Preferences {
   try {
-    const saved = JSON.parse(localStorage.getItem(storageKey) ?? '{}') as Partial<Preferences>;
+    const desktopValue = desktopPreferences?.read();
+    const saved = (desktopValue && typeof desktopValue === 'object'
+      ? desktopValue
+      : JSON.parse(localStorage.getItem(storageKey) ?? '{}')) as Partial<Preferences>;
     return {
       openRooms: Array.isArray(saved.openRooms) ? saved.openRooms.map(String) : defaultPreferences.openRooms,
       favorites: Array.isArray(saved.favorites) ? saved.favorites.map(String) : [],
       mutedRooms: Array.isArray(saved.mutedRooms) ? saved.mutedRooms.map(String) : [],
+      roomVolumes: readRoomVolumes(saved.roomVolumes),
       danmakuHiddenRooms: Array.isArray(saved.danmakuHiddenRooms) ? saved.danmakuHiddenRooms.map(String) : [],
       danmakuOpacity: readNumberPreference(saved.danmakuOpacity, defaultPreferences.danmakuOpacity, 20, 100),
       danmakuFontSize: readNumberPreference(saved.danmakuFontSize, defaultPreferences.danmakuFontSize, 12, 28),
       danmakuArea: ['top-quarter', 'top-third', 'top-half', 'full', 'bottom-half', 'bottom-quarter'].includes(String(saved.danmakuArea))
         ? saved.danmakuArea as DanmakuArea
         : defaultPreferences.danmakuArea,
+      giftRevenueRange: ['today', '7d', 'session'].includes(String(saved.giftRevenueRange))
+        ? saved.giftRevenueRange as GiftRevenueRange
+        : defaultPreferences.giftRevenueRange,
+      includeFreeGifts: saved.includeFreeGifts !== false,
+      giftSessionTotals: readGiftSessionTotals(saved.giftSessionTotals),
       layout: ['free', 'auto', '1', '2', '3', '4', 'focus'].includes(String(saved.layout))
         ? saved.layout as LayoutMode
         : 'auto',
@@ -179,16 +234,21 @@ function readPreferences(): Preferences {
 }
 
 const preferences = readPreferences();
+desktopPreferences?.write(preferences);
 const state = {
   rooms: [] as StreamRoom[],
   stats: [] as StatsRoom[],
   openRooms: [...preferences.openRooms],
   favorites: new Set(preferences.favorites),
   mutedRooms: new Set(preferences.mutedRooms),
+  roomVolumes: { ...preferences.roomVolumes },
   danmakuHiddenRooms: new Set(preferences.danmakuHiddenRooms),
   danmakuOpacity: preferences.danmakuOpacity,
   danmakuFontSize: preferences.danmakuFontSize,
   danmakuArea: preferences.danmakuArea,
+  giftRevenueRange: preferences.giftRevenueRange,
+  includeFreeGifts: preferences.includeFreeGifts,
+  giftSessionTotals: { ...preferences.giftSessionTotals },
   windowRects: { ...preferences.windowRects },
   queueCollapsed: preferences.queueCollapsed,
   inspectorCollapsed: preferences.inspectorCollapsed,
@@ -203,23 +263,71 @@ const state = {
   serviceMessage: '正在连接本地服务',
   lastUpdatedAt: 0,
   eventState: 'idle' as 'idle' | 'connecting' | 'online' | 'retrying',
+  inspectorFeed: 'chat' as 'chat' | 'gift',
 };
 
 const players = new Map<string, StreamPlayer>();
 const playerStates = new Map<string, { state: PlayerState; detail: string }>();
 const danmakuStates = new Map<string, { ok: boolean; text: string }>();
-const danmakuLanes = new Map<string, number[]>();
-const events: LiveEvent[] = demoMode ? [
-  { type: 'chat', room: '612904', nn: '演示观众', txt: '今晚的赛程开始了', time: Date.now() - 42000 },
-  { type: 'gift', room: '883120', nn: '山风', giftName: '荧光棒', count: 6, time: Date.now() - 18000 },
-] : [];
+const sevenDayGiftTotals = new Map<string, number>();
+const sevenDayPaidGiftTotals = new Map<string, number>();
+const sevenDayGiftLoadedAt = new Map<string, number>();
+const sevenDayGiftRequests = new Set<string>();
+const chatEvents: LiveEvent[] = demoMode
+  ? [{ type: 'chat', room: '612904', nn: '演示观众', txt: '今晚的赛程开始了', time: Date.now() - 42000 }]
+  : [];
+const giftEvents: LiveEvent[] = demoMode
+  ? [{ type: 'gift', room: '883120', sender: '山风', giftName: '荧光棒', giftCount: 6, giftPrice: 10, totalValue: 60, time: Date.now() - 18000 }]
+  : [];
+const giftEventKeys = new Set<string>();
 let streamsAbort: AbortController | null = null;
+let streamsRequest: Promise<boolean> | null = null;
 let statusAbort: AbortController | null = null;
 let statsAbort: AbortController | null = null;
-let danmakuSource: EventSource | null = null;
-let danmakuIntent = '';
+let statsEventSource: EventSource | null = null;
 let pendingRemovalIds: string[] = [];
 let zIndexCounter = 1;
+let preferencesSaveTimer = 0;
+
+interface RoomRuntimeState {
+  refreshAttempt: number;
+  nextRefreshAt: number;
+  requestedQuality: Quality;
+  automaticQuality: boolean;
+  qualityPending: boolean;
+}
+
+const roomRuntime = new Map<string, RoomRuntimeState>();
+const refreshRetrySeconds = [1, 2, 4, 8, 15, 30];
+let roomRefreshTimer = 0;
+
+const initiallyAudibleRooms = state.openRooms.filter((roomId) => !state.mutedRooms.has(roomId));
+initiallyAudibleRooms.slice(1).forEach((roomId) => state.mutedRooms.add(roomId));
+
+function runtimeFor(roomId: string, quality: Quality = 'HD'): RoomRuntimeState {
+  let runtime = roomRuntime.get(roomId);
+  if (!runtime) {
+    runtime = {
+      refreshAttempt: 0,
+      nextRefreshAt: Date.now() + Math.round(Math.random() * 2500),
+      requestedQuality: quality,
+      automaticQuality: false,
+      qualityPending: false,
+    };
+    roomRuntime.set(roomId, runtime);
+  }
+  return runtime;
+}
+
+function setNextRoomRefresh(runtime: RoomRuntimeState, success: boolean): void {
+  if (success) runtime.refreshAttempt = 0;
+  else runtime.refreshAttempt += 1;
+  const baseSeconds = success
+    ? 8
+    : refreshRetrySeconds[Math.min(runtime.refreshAttempt - 1, refreshRetrySeconds.length - 1)]!;
+  const jitter = 0.85 + Math.random() * 0.3;
+  runtime.nextRefreshAt = Date.now() + Math.round(baseSeconds * jitter * 1000);
+}
 
 app.innerHTML = `
   <a class="skip-link" href="#main-workspace">跳到主要工作区</a>
@@ -344,8 +452,8 @@ app.innerHTML = `
                 <button type="button" data-layout="4" aria-label="四列布局" title="四列布局">4</button>
                 <button type="button" data-layout="focus" aria-label="重点布局" title="重点布局"><i data-lucide="focus"></i></button>
               </div>
-              <button type="button" class="tool-button" data-action="open-danmaku-settings" aria-label="弹幕设置" title="弹幕设置">
-                <i data-lucide="sliders-horizontal"></i><span>弹幕设置</span>
+              <button type="button" class="tool-button" data-action="open-danmaku-settings" aria-label="显示设置" title="显示设置">
+                <i data-lucide="sliders-horizontal"></i><span>显示设置</span>
               </button>
               <button type="button" class="tool-button" data-action="mute-all" aria-label="全部静音" title="全部静音">
                 <i data-lucide="volume-x"></i><span>全部静音</span>
@@ -385,7 +493,6 @@ app.innerHTML = `
                   <th scope="col">活跃用户</th>
                   <th scope="col">互动用户</th>
                   <th scope="col">礼物金额</th>
-                  <th scope="col">贵族</th>
                 </tr>
               </thead>
               <tbody id="analytics-body"></tbody>
@@ -430,11 +537,25 @@ app.innerHTML = `
     <form method="dialog">
       <div class="settings-dialog-header">
         <div>
-          <h2>弹幕显示</h2>
+          <h2>显示设置</h2>
           <p>全部直播窗口</p>
         </div>
-        <button value="cancel" class="row-icon-button" aria-label="关闭弹幕设置" title="关闭"><i data-lucide="x"></i></button>
+        <button value="cancel" class="row-icon-button" aria-label="关闭显示设置" title="关闭"><i data-lucide="x"></i></button>
       </div>
+      <label class="danmaku-area-field gift-revenue-field" for="gift-revenue-range">
+        <span>礼物收入统计</span>
+        <select id="gift-revenue-range">
+          <option value="today">当日</option>
+          <option value="7d">近 7 日</option>
+          <option value="session">本次直播</option>
+        </select>
+      </label>
+      <label class="settings-toggle-row" for="include-free-gifts">
+        <span>统计免费礼物</span>
+        <input id="include-free-gifts" type="checkbox" />
+        <span class="toggle-track" aria-hidden="true"><span></span></span>
+      </label>
+      <div class="settings-group-label">弹幕</div>
       <div class="danmaku-setting-row">
         <label for="danmaku-opacity">透明度</label>
         <output id="danmaku-opacity-output" for="danmaku-opacity">92%</output>
@@ -500,6 +621,8 @@ const danmakuSettingsDialog = element<HTMLDialogElement>('danmaku-settings-dialo
 const danmakuOpacityInput = element<HTMLInputElement>('danmaku-opacity');
 const danmakuFontSizeInput = element<HTMLInputElement>('danmaku-font-size');
 const danmakuAreaSelect = element<HTMLSelectElement>('danmaku-area');
+const giftRevenueRangeSelect = element<HTMLSelectElement>('gift-revenue-range');
+const includeFreeGiftsInput = element<HTMLInputElement>('include-free-gifts');
 const commandDialog = element<HTMLDialogElement>('command-dialog');
 const commandInput = element<HTMLInputElement>('command-input');
 const freeWindowToggle = element<HTMLInputElement>('free-window-toggle');
@@ -525,16 +648,26 @@ function savePreferences(): void {
     openRooms: state.openRooms,
     favorites: [...state.favorites],
     mutedRooms: [...state.mutedRooms],
+    roomVolumes: state.roomVolumes,
     danmakuHiddenRooms: [...state.danmakuHiddenRooms],
     danmakuOpacity: state.danmakuOpacity,
     danmakuFontSize: state.danmakuFontSize,
     danmakuArea: state.danmakuArea,
+    giftRevenueRange: state.giftRevenueRange,
+    includeFreeGifts: state.includeFreeGifts,
+    giftSessionTotals: state.giftSessionTotals,
     layout: state.layout,
     windowRects: state.windowRects,
     queueCollapsed: state.queueCollapsed,
     inspectorCollapsed: state.inspectorCollapsed,
   };
   localStorage.setItem(storageKey, JSON.stringify(value));
+  desktopPreferences?.write(value);
+}
+
+function schedulePreferencesSave(): void {
+  window.clearTimeout(preferencesSaveTimer);
+  preferencesSaveTimer = window.setTimeout(savePreferences, 500);
 }
 
 const desktopQueueMedia = window.matchMedia('(min-width: 901px)');
@@ -559,12 +692,18 @@ function applyDanmakuDisplaySettings(persist = false): void {
   danmakuAreaSelect.value = state.danmakuArea;
   element<HTMLOutputElement>('danmaku-opacity-output').value = `${state.danmakuOpacity}%`;
   element<HTMLOutputElement>('danmaku-font-size-output').value = `${state.danmakuFontSize} px`;
-  danmakuLanes.clear();
+  players.forEach((player) => player.setDanmakuSettings(
+    state.danmakuOpacity,
+    state.danmakuFontSize,
+    state.danmakuArea,
+  ));
   if (persist) savePreferences();
 }
 
 function openDanmakuSettings(): void {
   applyDanmakuDisplaySettings();
+  giftRevenueRangeSelect.value = state.giftRevenueRange;
+  includeFreeGiftsInput.checked = state.includeFreeGifts;
   danmakuSettingsDialog.showModal();
 }
 
@@ -639,6 +778,14 @@ function roomById(roomId: string): StreamRoom | undefined {
   return state.rooms.find((room) => room.room === roomId);
 }
 
+function statsByRoomId(roomId: string): StatsRoom | undefined {
+  return state.stats.find((room) => String(room.rid) === roomId);
+}
+
+function roomVolume(roomId: string): number {
+  return state.roomVolumes[roomId] ?? 100;
+}
+
 function displayRoomName(room: StreamRoom | undefined, roomId: string): string {
   return room?.name || `房间 ${roomId}`;
 }
@@ -670,12 +817,42 @@ function formatInteger(value: number | undefined): string {
   return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 0 }).format(value ?? 0);
 }
 
-function formatMoney(cents: number | undefined): string {
+function formatMoney(amountCny: number | undefined): string {
   return new Intl.NumberFormat('zh-CN', {
     style: 'currency',
     currency: 'CNY',
-    maximumFractionDigits: 0,
-  }).format((cents ?? 0) / 100);
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(amountCny ?? 0);
+}
+
+const giftRevenueRangeNames: Record<GiftRevenueRange, string> = {
+  today: '当日',
+  '7d': '近 7 日',
+  session: '本次直播',
+};
+
+function formatCny(cents: number | undefined): string {
+  if (cents === undefined) return 'CNY --';
+  const amount = Math.max(0, cents) / 100;
+  return `CNY ${new Intl.NumberFormat('zh-CN', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(amount)}`;
+}
+
+function giftRevenueCents(roomId: string): number | undefined {
+  if (state.giftRevenueRange === 'session') return state.giftSessionTotals[roomId]?.totalCents ?? 0;
+  if (state.giftRevenueRange === '7d') {
+    return (state.includeFreeGifts ? sevenDayGiftTotals : sevenDayPaidGiftTotals).get(roomId);
+  }
+  const room = statsByRoomId(roomId);
+  const amountCny = state.includeFreeGifts ? room?.giftTotal : (room?.giftPaid ?? room?.sr);
+  return amountCny === undefined ? undefined : Math.round(amountCny * 100);
+}
+
+function statsGiftAmount(room: StatsRoom): number {
+  return state.includeFreeGifts ? (room.giftTotal ?? 0) : (room.giftPaid ?? room.sr ?? 0);
 }
 
 function formatDuration(showTime: number): string {
@@ -691,6 +868,53 @@ function formatEventTime(value: number | string | undefined): string {
   const date = value ? new Date(value) : new Date();
   if (Number.isNaN(date.getTime())) return '--:--:--';
   return date.toLocaleTimeString('zh-CN', { hour12: false });
+}
+
+function giftEventKey(event: LiveEvent): string {
+  return [
+    event.rid ?? event.room ?? '',
+    event.time ?? '',
+    event.sender ?? event.nn ?? '',
+    event.giftName ?? event.gfname ?? '',
+    event.giftCount ?? event.count ?? event.gfcnt ?? 1,
+    event.totalValue ?? '',
+  ].join('|');
+}
+
+function addLiveEvent(event: LiveEvent): boolean {
+  const normalized = { ...event, time: event.time ?? Date.now() };
+  if (normalized.type === 'gift') {
+    const key = giftEventKey(normalized);
+    if (giftEventKeys.has(key)) return false;
+    giftEventKeys.add(key);
+    giftEvents.unshift(normalized);
+    if (giftEvents.length > 300) {
+      const removed = giftEvents.pop();
+      if (removed) giftEventKeys.delete(giftEventKey(removed));
+    }
+    return true;
+  }
+  if (normalized.type === 'chat') {
+    chatEvents.unshift(normalized);
+    if (chatEvents.length > 300) chatEvents.length = 300;
+    return true;
+  }
+  return false;
+}
+
+function mergeStatsGiftEvents(rooms: StatsRoom[]): boolean {
+  let changed = false;
+  rooms.forEach((room) => {
+    (room.gifts ?? []).forEach((gift) => {
+      changed = addLiveEvent({ ...gift, type: 'gift', rid: gift.rid ?? room.rid }) || changed;
+    });
+  });
+  giftEvents.sort((left, right) => Number(right.time ?? 0) - Number(left.time ?? 0));
+  return changed;
+}
+
+function isFreeGift(event: LiveEvent): boolean {
+  return Number(event.totalValue ?? 0) <= 0;
 }
 
 function toast(message: string, tone: 'info' | 'error' | 'success' = 'info'): void {
@@ -787,9 +1011,11 @@ function createStreamCard(roomId: string): HTMLElement {
   card.dataset.room = roomId;
   card.style.zIndex = String(++zIndexCounter);
   card.innerHTML = `
+    <div class="stream-chrome-trigger" aria-hidden="true"></div>
     <div class="stream-chrome">
       <button type="button" class="drag-handle" aria-label="移动直播窗口；方向键移动，Alt 加方向键调整大小" title="拖动窗口；方向键移动；Alt+方向键调整大小"><i data-lucide="grip-vertical"></i></button>
       <div class="stream-title"><strong></strong><small></small></div>
+      <span class="stream-revenue" title="礼物收入" aria-label="礼物收入"><i data-lucide="circle-dollar-sign"></i><span data-gift-revenue>CNY --</span></span>
       <span class="stream-duration">00:00:00</span>
       <label class="quality-select">
         <span class="sr-only">清晰度</span>
@@ -806,19 +1032,33 @@ function createStreamCard(roomId: string): HTMLElement {
       <button type="button" class="row-icon-button close-stream-button" data-action="close-room" aria-label="关闭画面" title="关闭画面"><i data-lucide="x"></i></button>
     </div>
     <div class="video-frame">
-      <video autoplay muted playsinline></video>
+      <div class="native-player-surface" role="img" aria-label="libmpv 直播画面"></div>
       <div class="player-state">
         <i data-lucide="activity"></i>
         <strong>等待直播流</strong>
         <span></span>
       </div>
-      <div class="danmaku-layer" aria-hidden="true"></div>
       <div class="stream-state-tag"></div>
       <div class="video-controls" aria-label="直播播放控制">
         <button type="button" class="media-control-button" data-action="toggle-playback" aria-label="暂停" title="暂停"><i data-lucide="pause"></i></button>
         <span class="live-control-status"><span aria-hidden="true"></span>直播</span>
         <span class="video-controls-spacer"></span>
+        <label class="media-quality-select">
+          <span class="sr-only">清晰度</span>
+          <select data-quality data-room="${roomId}" aria-label="清晰度">
+            <option value="OD">原画</option>
+            <option value="UHD">超清</option>
+            <option value="HD">高清</option>
+            <option value="SD">标清</option>
+          </select>
+          <i data-lucide="chevron-down"></i>
+        </label>
         <button type="button" class="media-control-button media-mute-button" data-action="toggle-mute" aria-label="静音" title="静音"><i data-lucide="volume-2"></i></button>
+        <label class="media-volume-control" title="音量">
+          <span class="sr-only">音量</span>
+          <input type="range" min="0" max="100" step="1" value="100" data-volume data-room="${roomId}" aria-label="音量" />
+          <output data-volume-output data-room="${roomId}">100%</output>
+        </label>
         <button type="button" class="media-control-button" data-action="fullscreen-room" aria-label="全屏" title="全屏"><i data-lucide="maximize-2"></i></button>
       </div>
     </div>
@@ -831,16 +1071,15 @@ function createStreamCard(roomId: string): HTMLElement {
     <div class="resize-handle resize-se" data-resize="se"></div>
     <div class="resize-handle resize-sw" data-resize="sw"></div>
   `;
-  const video = card.querySelector<HTMLVideoElement>('video')!;
-  const player = new StreamPlayer(video, (playerState, detail = '') => {
+  const surface = card.querySelector<HTMLElement>('.native-player-surface')!;
+  const player = new StreamPlayer(roomId, surface, (playerState, detail = '') => {
     playerStates.set(roomId, { state: playerState, detail });
     updatePlayerState(roomId);
     updatePlaybackControls(roomId);
   });
   players.set(roomId, player);
-  for (const eventName of ['play', 'pause', 'volumechange'] as const) {
-    video.addEventListener(eventName, () => updatePlaybackControls(roomId));
-  }
+  player.setDanmakuSettings(state.danmakuOpacity, state.danmakuFontSize, state.danmakuArea);
+  player.setDanmakuVisible(!state.danmakuHiddenRooms.has(roomId));
   card.addEventListener('pointerdown', (event) => {
     const target = event.target as HTMLElement;
     if (target.closest('.stream-chrome [data-action], .stream-chrome select, .video-controls [data-action]')) {
@@ -858,13 +1097,14 @@ function createStreamCard(roomId: string): HTMLElement {
 
 function updatePlaybackControls(roomId: string): void {
   const card = videoGrid.querySelector<HTMLElement>(`.stream-card[data-room="${roomId}"]`);
-  const video = card?.querySelector<HTMLVideoElement>('video');
+  const player = players.get(roomId);
   const room = roomById(roomId);
-  if (!card || !video || !room) return;
+  if (!card || !player || !room) return;
   const hasStream = room.ok && Boolean(room.url) && !demoMode;
-  const paused = video.paused;
+  const paused = player.isPaused();
   const playButton = card.querySelector<HTMLButtonElement>('[data-action="toggle-playback"]')!;
   const muteButton = card.querySelector<HTMLButtonElement>('.media-mute-button')!;
+  const chromeMuteButton = card.querySelector<HTMLButtonElement>('.stream-chrome [data-action="toggle-mute"]')!;
 
   card.classList.toggle('has-stream', hasStream);
   card.classList.toggle('is-paused', hasStream && paused);
@@ -873,11 +1113,112 @@ function updatePlaybackControls(roomId: string): void {
   playButton.title = paused ? '播放' : '暂停';
   setControlIcon(playButton, paused ? 'play' : 'pause');
   muteButton.disabled = !hasStream;
-  muteButton.classList.toggle('is-active', video.muted);
-  muteButton.setAttribute('aria-pressed', String(video.muted));
-  muteButton.setAttribute('aria-label', video.muted ? '取消静音' : '静音');
-  muteButton.title = video.muted ? '取消静音' : '静音';
-  setControlIcon(muteButton, video.muted ? 'volume-x' : 'volume-2');
+  muteButton.classList.toggle('is-active', player.isMuted());
+  muteButton.setAttribute('aria-pressed', String(player.isMuted()));
+  muteButton.setAttribute('aria-label', player.isMuted() ? '取消静音' : '静音');
+  muteButton.title = player.isMuted() ? '取消静音' : '静音';
+  setControlIcon(muteButton, player.isMuted() ? 'volume-x' : 'volume-2');
+  chromeMuteButton.classList.toggle('is-active', player.isMuted());
+  chromeMuteButton.setAttribute('aria-pressed', String(player.isMuted()));
+  chromeMuteButton.setAttribute('aria-label', player.isMuted() ? '取消静音' : '静音');
+  chromeMuteButton.title = player.isMuted() ? '取消静音' : '静音';
+  setControlIcon(chromeMuteButton, player.isMuted() ? 'volume-x' : 'volume-2');
+  updateVolumeControls(roomId, hasStream);
+}
+
+function updateVolumeControls(roomId: string, enabled = true): void {
+  const volume = roomVolume(roomId);
+  document.querySelectorAll<HTMLInputElement>(`input[data-volume][data-room="${CSS.escape(roomId)}"]`).forEach((input) => {
+    input.value = String(volume);
+    input.disabled = Boolean(input.closest('.video-controls')) && !enabled;
+    input.setAttribute('aria-valuetext', `${volume}%`);
+  });
+  document.querySelectorAll<HTMLOutputElement>(`output[data-volume-output][data-room="${CSS.escape(roomId)}"]`).forEach((output) => {
+    output.value = `${volume}%`;
+  });
+}
+
+function updateGiftRevenueDisplays(): void {
+  const rangeName = giftRevenueRangeNames[state.giftRevenueRange];
+  videoGrid.querySelectorAll<HTMLElement>('.stream-card[data-room]').forEach((card) => {
+    const roomId = card.dataset.room ?? '';
+    const value = formatCny(giftRevenueCents(roomId));
+    const display = card.querySelector<HTMLElement>('[data-gift-revenue]');
+    const wrapper = display?.closest<HTMLElement>('.stream-revenue');
+    if (display) display.textContent = value;
+    const description = `礼物收入 · ${rangeName} · ${value}`;
+    wrapper?.setAttribute('aria-label', description);
+    if (wrapper) wrapper.title = description;
+  });
+}
+
+async function loadSevenDayGiftRevenue(roomIds = state.openRooms): Promise<void> {
+  if (state.giftRevenueRange !== '7d') return;
+  if (demoMode) {
+    demoStats.forEach((room) => sevenDayGiftTotals.set(room.rid, (room.giftTotal ?? 0) * 7));
+    updateGiftRevenueDisplays();
+    return;
+  }
+
+  const now = Date.now();
+  const pending = roomIds.filter((roomId) => (
+    !sevenDayGiftRequests.has(roomId)
+    && now - (sevenDayGiftLoadedAt.get(roomId) ?? 0) >= 60000
+  ));
+  await Promise.all(pending.map(async (roomId) => {
+    sevenDayGiftRequests.add(roomId);
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 8000);
+    try {
+      const result = await getRoomTrend(roomId, controller.signal);
+      const amountCny = Number(result.agg?.['7d']?.lw ?? 0);
+      const paidCny = Number(result.agg?.['7d']?.sr ?? 0);
+      if (Number.isFinite(amountCny) && Number.isFinite(paidCny)) {
+        sevenDayGiftTotals.set(roomId, Math.max(0, Math.round(amountCny * 100)));
+        sevenDayPaidGiftTotals.set(roomId, Math.max(0, Math.round(paidCny * 100)));
+        sevenDayGiftLoadedAt.set(roomId, Date.now());
+      }
+    } catch {
+      // Keep the last successful value when a room trend request is unavailable.
+    } finally {
+      window.clearTimeout(timeout);
+      sevenDayGiftRequests.delete(roomId);
+    }
+  }));
+  updateGiftRevenueDisplays();
+}
+
+function syncGiftSessions(rooms: StreamRoom[]): void {
+  let changed = false;
+  rooms.forEach((room) => {
+    if (!room.ok || !room.showTime) return;
+    const current = state.giftSessionTotals[room.room];
+    if (!current || current.showTime !== room.showTime) {
+      state.giftSessionTotals[room.room] = { showTime: room.showTime, totalCents: 0 };
+      changed = true;
+    }
+  });
+  if (changed) schedulePreferencesSave();
+}
+
+function recordRealtimeGiftRevenue(event: LiveEvent): void {
+  if (event.type !== 'gift') return;
+  const roomId = String(event.room ?? event.rid ?? '');
+  if (!roomId) return;
+  const count = Number(event.giftCount ?? event.count ?? event.gfcnt ?? 1);
+  const totalCents = Number(event.totalValue ?? (Number(event.giftPrice) * count));
+  if (!Number.isFinite(totalCents) || totalCents <= 0) return;
+
+  const room = roomById(roomId);
+  const showTime = room?.showTime ?? state.giftSessionTotals[roomId]?.showTime ?? 0;
+  const current = state.giftSessionTotals[roomId];
+  const session = !current || (showTime > 0 && current.showTime !== showTime)
+    ? { showTime, totalCents: 0 }
+    : current;
+  session.totalCents += Math.round(totalCents);
+  state.giftSessionTotals[roomId] = session;
+  schedulePreferencesSave();
+  if (state.giftRevenueRange === 'session') updateGiftRevenueDisplays();
 }
 
 function updatePlayerState(roomId: string): void {
@@ -888,6 +1229,10 @@ function updatePlayerState(roomId: string): void {
   const title = overlay.querySelector<HTMLElement>('strong')!;
   const detail = overlay.querySelector<HTMLSpanElement>('span')!;
   const current = playerStates.get(roomId) ?? { state: 'idle' as PlayerState, detail: '' };
+
+  players.get(roomId)?.setSurfaceVisible(
+    current.state === 'playing' && room.ok && Boolean(room.url) && state.view === 'monitor',
+  );
 
   overlay.hidden = current.state === 'playing';
   overlay.dataset.state = current.state;
@@ -941,11 +1286,18 @@ function updateStreamCard(card: HTMLElement, room: StreamRoom): void {
   code.textContent = roomCode;
   code.title = roomCode;
   card.querySelector<HTMLElement>('.stream-duration')!.textContent = room.ok ? formatDuration(room.showTime) : '00:00:00';
+  const revenue = formatCny(giftRevenueCents(room.room));
+  const revenueDescription = `礼物收入 · ${giftRevenueRangeNames[state.giftRevenueRange]} · ${revenue}`;
+  card.querySelector<HTMLElement>('[data-gift-revenue]')!.textContent = revenue;
+  const revenueWrapper = card.querySelector<HTMLElement>('.stream-revenue')!;
+  revenueWrapper.title = revenueDescription;
+  revenueWrapper.setAttribute('aria-label', revenueDescription);
   const tag = card.querySelector<HTMLElement>('.stream-state-tag')!;
   tag.textContent = roomStateText(room);
   tag.dataset.state = room.ok ? (room.loop ? 'loop' : 'live') : 'offline';
-  const quality = card.querySelector<HTMLSelectElement>('[data-quality]')!;
-  quality.value = room.quality;
+  card.querySelectorAll<HTMLSelectElement>('[data-quality]').forEach((quality) => {
+    quality.value = room.quality;
+  });
   const muted = state.mutedRooms.has(room.room);
   const muteButton = card.querySelector<HTMLButtonElement>('.stream-chrome [data-action="toggle-mute"]')!;
   muteButton.innerHTML = muted ? '<i data-lucide="volume-x"></i>' : '<i data-lucide="volume-2"></i>';
@@ -953,7 +1305,14 @@ function updateStreamCard(card: HTMLElement, room: StreamRoom): void {
   muteButton.setAttribute('aria-pressed', String(muted));
   muteButton.setAttribute('aria-label', muted ? '取消静音' : '静音');
   muteButton.title = muted ? '取消静音' : '静音';
+  players.get(room.room)?.setVolume(roomVolume(room.room) / 100);
   players.get(room.room)?.setMuted(muted);
+  players.get(room.room)?.setDanmakuVisible(!state.danmakuHiddenRooms.has(room.room));
+  players.get(room.room)?.setDanmakuSettings(
+    state.danmakuOpacity,
+    state.danmakuFontSize,
+    state.danmakuArea,
+  );
 
   updateDanmakuControl(room.room);
 
@@ -1067,6 +1426,8 @@ function constrainAllWindows(): void {
 
 function bringWindowToFront(card: HTMLElement): void {
   card.style.zIndex = String(++zIndexCounter);
+  const roomId = card.dataset.room;
+  if (roomId) players.get(roomId)?.bringToFront();
 }
 
 function renderCanvas(): void {
@@ -1108,18 +1469,9 @@ function renderCanvas(): void {
     if (state.layout === 'free') constrainAllWindows();
     else arrangeWindows(state.layout, false);
   }
+  void applyMultiRoomQualityPolicy();
   drawIcons();
 }
-
-const danmakuColors: Record<string, string> = {
-  '1': '#ff7078',
-  '2': '#73b7ff',
-  '3': '#72e6a4',
-  '4': '#ffb970',
-  '5': '#d69aff',
-  '6': '#ff8fcf',
-  '7': '#ffe174',
-};
 
 function updateDanmakuControl(roomId: string): void {
   const card = videoGrid.querySelector<HTMLElement>(`.stream-card[data-room="${roomId}"]`);
@@ -1127,60 +1479,13 @@ function updateDanmakuControl(roomId: string): void {
   const visible = !state.danmakuHiddenRooms.has(roomId);
   const connection = danmakuStates.get(roomId);
   const button = card.querySelector<HTMLButtonElement>('[data-action="toggle-danmaku"]');
-  const layer = card.querySelector<HTMLElement>('.danmaku-layer');
-  if (!button || !layer) return;
+  if (!button) return;
   button.classList.toggle('is-active', visible);
   button.classList.toggle('is-connected', visible && Boolean(connection?.ok));
   button.setAttribute('aria-pressed', String(visible));
   button.setAttribute('aria-label', visible ? '隐藏弹幕' : '显示弹幕');
   button.title = visible ? (connection?.text || '隐藏弹幕') : '显示弹幕';
-  layer.hidden = !visible;
-}
-
-function addDanmakuItem(roomId: string, event: LiveEvent): void {
-  if (state.danmakuHiddenRooms.has(roomId)) return;
-  const text = String(event.txt ?? event.text ?? '').trim();
-  if (!text) return;
-  const layer = videoGrid.querySelector<HTMLElement>(`.stream-card[data-room="${roomId}"] .danmaku-layer`);
-  if (!layer || layer.hidden) return;
-
-  const item = document.createElement('span');
-  item.className = 'danmaku-item';
-  item.textContent = text;
-  item.style.color = danmakuColors[String(event.col ?? '')] ?? '#ffffff';
-  layer.appendChild(item);
-
-  const laneHeight = Math.max(24, item.offsetHeight + 5);
-  const laneCount = Math.max(1, Math.floor((layer.clientHeight - 8) / laneHeight));
-  const lanes = danmakuLanes.get(roomId) ?? [];
-  if (lanes.length !== laneCount) {
-    lanes.length = 0;
-    lanes.push(...Array.from({ length: laneCount }, () => 0));
-  }
-  const now = performance.now();
-  let laneIndex = 0;
-  for (let index = 1; index < lanes.length; index += 1) {
-    if ((lanes[index] ?? 0) < (lanes[laneIndex] ?? 0)) laneIndex = index;
-  }
-  if ((lanes[laneIndex] ?? 0) > now) {
-    item.remove();
-    return;
-  }
-
-  item.style.top = `${4 + laneIndex * laneHeight}px`;
-  const distance = layer.clientWidth + item.offsetWidth;
-  const duration = Math.max(3600, (distance / 72) * 1000);
-  lanes[laneIndex] = now + duration;
-  danmakuLanes.set(roomId, lanes);
-  const animation = item.animate(
-    [
-      { transform: `translate3d(${layer.clientWidth}px, 0, 0)` },
-      { transform: `translate3d(${-item.offsetWidth}px, 0, 0)` },
-    ],
-    { duration, easing: 'linear' },
-  );
-  animation.onfinish = () => item.remove();
-  while (layer.children.length > 60) layer.firstElementChild?.remove();
+  players.get(roomId)?.setDanmakuVisible(visible);
 }
 
 function renderInspector(): void {
@@ -1220,7 +1525,7 @@ function renderInspector(): void {
     ['运行状态', roomStateText(room)],
     ['开播时长', room.ok ? formatDuration(room.showTime) : '未计时'],
     ['当前清晰度', qualityNames[room.quality]],
-    ['弹幕通道', state.eventState === 'online' ? '已连接' : state.eventState === 'retrying' ? '重连中' : '未连接'],
+    ['弹幕通道', danmakuStates.get(room.room)?.text ?? '正在连接'],
   ];
   factItems.forEach(([label, value]) => {
     const wrapper = document.createElement('div');
@@ -1256,6 +1561,10 @@ function renderInspector(): void {
       </select>
       <i data-lucide="chevron-down"></i>
     </div>
+    <div class="inspector-volume-control">
+      <label class="field-label" for="inspector-volume">音量 <output data-volume-output data-room="${room.room}">${roomVolume(room.room)}%</output></label>
+      <input id="inspector-volume" type="range" min="0" max="100" step="1" value="${roomVolume(room.room)}" data-volume data-room="${room.room}" aria-label="音量" />
+    </div>
     <div class="inspector-actions">
       <button type="button" class="secondary-button" data-action="refresh-room" data-room="${room.room}"><i data-lucide="refresh-cw"></i><span>刷新流</span></button>
       <button type="button" class="secondary-button" data-action="toggle-mute" data-room="${room.room}"><i data-lucide="${state.mutedRooms.has(room.room) ? 'volume-2' : 'volume-x'}"></i><span>${state.mutedRooms.has(room.room) ? '取消静音' : '静音'}</span></button>
@@ -1264,15 +1573,32 @@ function renderInspector(): void {
   `;
   controls.querySelector<HTMLSelectElement>('[data-quality]')!.value = room.quality;
   inspectorContent.appendChild(controls);
+  updateVolumeControls(room.room, room.ok && Boolean(room.url) && !demoMode);
 
   const eventSection = document.createElement('section');
   eventSection.className = 'inspector-section event-section';
-  eventSection.innerHTML = '<div class="section-heading"><h3>最近事件</h3><span></span></div><div class="event-list"></div>';
-  const roomEvents = events.filter((event) => String(event.room ?? event.rid ?? '') === room.room).slice(0, 20);
-  eventSection.querySelector<HTMLElement>('.section-heading span')!.textContent = `${roomEvents.length} 条`;
+  eventSection.innerHTML = `
+    <div class="event-tabs" role="tablist" aria-label="房间事件">
+      <button type="button" role="tab" data-event-feed="chat">弹幕</button>
+      <button type="button" role="tab" data-event-feed="gift">礼物</button>
+      <span></span>
+    </div>
+    <div class="event-list" role="tabpanel"></div>
+  `;
+  eventSection.querySelectorAll<HTMLButtonElement>('[data-event-feed]').forEach((button) => {
+    const active = button.dataset.eventFeed === state.inspectorFeed;
+    button.classList.toggle('is-active', active);
+    button.setAttribute('aria-selected', String(active));
+  });
+  const source = state.inspectorFeed === 'gift' ? giftEvents : chatEvents;
+  const roomEvents = source
+    .filter((event) => String(event.room ?? event.rid ?? '') === room.room)
+    .filter((event) => state.inspectorFeed !== 'gift' || state.includeFreeGifts || !isFreeGift(event))
+    .slice(0, 50);
+  eventSection.querySelector<HTMLElement>('.event-tabs span')!.textContent = `${roomEvents.length} 条`;
   const eventList = eventSection.querySelector<HTMLDivElement>('.event-list')!;
   if (roomEvents.length === 0) {
-    eventList.innerHTML = '<div class="event-empty">等待弹幕或礼物事件</div>';
+    eventList.innerHTML = `<div class="event-empty">等待${state.inspectorFeed === 'gift' ? '礼物' : '弹幕'}事件</div>`;
   } else {
     roomEvents.forEach((event) => eventList.appendChild(createEventRow(event)));
   }
@@ -1282,12 +1608,14 @@ function renderInspector(): void {
 
 function createEventRow(event: LiveEvent): HTMLElement {
   const row = document.createElement('div');
-  row.className = `event-row is-${event.type === 'gift' || event.type === 'noble' ? 'gift' : 'chat'}`;
+  row.className = `event-row is-${event.type === 'gift' ? 'gift' : 'chat'}`;
   row.innerHTML = '<time></time><div><strong></strong><span></span></div>';
   row.querySelector('time')!.textContent = formatEventTime(event.time);
-  row.querySelector('strong')!.textContent = event.nn || event.name || '匿名用户';
-  const message = event.type === 'gift' || event.type === 'noble'
-    ? `${event.giftName || event.gfname || '礼物'} x${event.count || event.gfcnt || 1}`
+  row.querySelector('strong')!.textContent = event.sender || event.nn || event.name || '匿名用户';
+  const giftCount = event.giftCount ?? event.count ?? event.gfcnt ?? 1;
+  const amount = Number(event.totalValue ?? 0);
+  const message = event.type === 'gift'
+    ? `${event.giftName || event.gfname || '礼物'} x${giftCount}${amount > 0 ? ` · ${formatMoney(amount / 100)}` : ' · 免费'}`
     : event.text || event.txt || '新弹幕';
   row.querySelector('span')!.textContent = message;
   return row;
@@ -1299,7 +1627,7 @@ function renderAnalytics(): void {
     ['监控房间', formatInteger(rooms.length), '当前统计范围'],
     ['正在直播', formatInteger(rooms.filter((room) => room.live).length), '实时房间'],
     ['总热度', formatInteger(rooms.reduce((sum, room) => sum + (room.hot ?? 0), 0)), '房间热度合计'],
-    ['礼物金额', formatMoney(rooms.reduce((sum, room) => sum + (room.giftTotal ?? 0), 0)), '当前会话累计'],
+    ['礼物金额', formatMoney(rooms.reduce((sum, room) => sum + statsGiftAmount(room), 0)), state.includeFreeGifts ? '包含免费礼物' : '仅付费礼物'],
   ];
   metricStrip.replaceChildren();
   totals.forEach(([label, value, detail]) => {
@@ -1326,8 +1654,7 @@ function renderAnalytics(): void {
       formatInteger(room.hot),
       formatInteger(room.activeUV),
       formatInteger((room.chatUV ?? 0) + (room.giftUV ?? 0)),
-      formatMoney(room.giftTotal),
-      formatInteger(room.noble),
+      formatMoney(statsGiftAmount(room)),
     ];
     cells.forEach((value, index) => {
       const cell = document.createElement(index === 0 ? 'th' : 'td');
@@ -1359,6 +1686,7 @@ function renderView(): void {
     button.classList.toggle('is-active', active);
     button.setAttribute('aria-current', active ? 'page' : 'false');
   });
+  state.openRooms.forEach((roomId) => updatePlayerState(roomId));
 }
 
 function renderAll(): void {
@@ -1370,42 +1698,77 @@ function renderAll(): void {
   renderView();
 }
 
-async function loadRooms(silent = false): Promise<void> {
+async function loadRooms(silent = false): Promise<boolean> {
   if (demoMode) {
     state.rooms = [...demoRooms];
     state.stats = [...demoStats];
+    state.rooms.forEach((room) => runtimeFor(room.room, room.quality));
+    syncGiftSessions(state.rooms);
     state.service = 'online';
     state.serviceMessage = '演示服务正常';
     state.lastUpdatedAt = Date.now();
     renderAll();
-    return;
+    return true;
   }
 
-  streamsAbort?.abort();
+  if (streamsRequest) return streamsRequest;
   const controller = new AbortController();
   streamsAbort = controller;
-  try {
-    const rooms = await getStreams(controller.signal);
-    state.rooms = rooms;
-    state.openRooms = state.openRooms.filter((roomId) => rooms.some((room) => room.room === roomId));
-    if (state.activeRoom && !rooms.some((room) => room.room === state.activeRoom)) {
-      state.activeRoom = state.openRooms[0] ?? rooms[0]?.room ?? null;
+  const run = async (): Promise<boolean> => {
+    try {
+      const rooms = await getStreams(controller.signal);
+      state.rooms = rooms;
+      const validRoomIds = new Set(rooms.map((room) => room.room));
+      rooms.forEach((room) => runtimeFor(room.room, room.quality));
+      [...roomRuntime.keys()].forEach((roomId) => {
+        if (!validRoomIds.has(roomId)) roomRuntime.delete(roomId);
+      });
+      syncGiftSessions(rooms);
+      state.openRooms = state.openRooms.filter((roomId) => validRoomIds.has(roomId));
+      if (state.activeRoom && !validRoomIds.has(state.activeRoom)) {
+        state.activeRoom = state.openRooms[0] ?? rooms[0]?.room ?? null;
+      }
+      state.lastUpdatedAt = Date.now();
+      if (state.service === 'offline' || state.service === 'checking') {
+        state.service = 'online';
+        state.serviceMessage = '本地服务正常';
+      }
+      savePreferences();
+      renderAll();
+      connectDanmaku();
+      void applyMultiRoomQualityPolicy();
+      return true;
+    } catch (error) {
+      if (controller.signal.aborted) return false;
+      state.service = 'offline';
+      state.serviceMessage = '本地服务未连接';
+      renderHeader();
+      if (!silent) toast(error instanceof Error ? error.message : '读取房间失败', 'error');
+      return false;
+    } finally {
+      if (streamsAbort === controller) streamsAbort = null;
+      streamsRequest = null;
     }
-    state.lastUpdatedAt = Date.now();
-    if (state.service === 'offline' || state.service === 'checking') {
-      state.service = 'online';
-      state.serviceMessage = '本地服务正常';
-    }
-    savePreferences();
-    renderAll();
-    connectDanmaku();
-  } catch (error) {
-    if (controller.signal.aborted) return;
-    state.service = 'offline';
-    state.serviceMessage = '本地服务未连接';
-    renderHeader();
-    if (!silent) toast(error instanceof Error ? error.message : '读取房间失败', 'error');
+  };
+  streamsRequest = run();
+  return streamsRequest;
+}
+
+async function runRoomRefreshScheduler(): Promise<void> {
+  window.clearTimeout(roomRefreshTimer);
+  if (document.hidden || state.rooms.length === 0) {
+    roomRefreshTimer = window.setTimeout(() => void runRoomRefreshScheduler(), 3000);
+    return;
   }
+  const now = Date.now();
+  const due = state.rooms.filter((room) => runtimeFor(room.room, room.quality).nextRefreshAt <= now);
+  if (due.length > 0) {
+    const success = await loadRooms(true);
+    due.forEach((room) => setNextRoomRefresh(runtimeFor(room.room, room.quality), success));
+  }
+  const nextAt = Math.min(...state.rooms.map((room) => runtimeFor(room.room, room.quality).nextRefreshAt));
+  const delay = Number.isFinite(nextAt) ? Math.min(3000, Math.max(350, nextAt - Date.now())) : 2000;
+  roomRefreshTimer = window.setTimeout(() => void runRoomRefreshScheduler(), delay);
 }
 
 async function checkService(): Promise<void> {
@@ -1436,8 +1799,11 @@ async function checkService(): Promise<void> {
 async function loadAnalytics(silent = false): Promise<void> {
   if (demoMode) {
     state.stats = [...demoStats];
+    mergeStatsGiftEvents(state.stats);
     element<HTMLSpanElement>('analytics-updated').textContent = '演示数据';
     renderAnalytics();
+    updateGiftRevenueDisplays();
+    void loadSevenDayGiftRevenue();
     return;
   }
   statsAbort?.abort();
@@ -1446,8 +1812,12 @@ async function loadAnalytics(silent = false): Promise<void> {
   try {
     const result = await getStats(controller.signal);
     state.stats = result.rooms ?? [];
+    mergeStatsGiftEvents(state.stats);
     element<HTMLSpanElement>('analytics-updated').textContent = `已同步 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`;
     renderAnalytics();
+    if (state.inspectorFeed === 'gift') renderInspector();
+    updateGiftRevenueDisplays();
+    void loadSevenDayGiftRevenue();
   } catch (error) {
     if (controller.signal.aborted) return;
     element<HTMLSpanElement>('analytics-updated').textContent = '同步失败';
@@ -1461,49 +1831,73 @@ function connectDanmaku(): void {
     renderInspector();
     return;
   }
-  const intent = [...state.openRooms].sort().join(',');
-  if (intent === danmakuIntent && danmakuSource) return;
-  danmakuSource?.close();
-  danmakuSource = null;
-  danmakuIntent = intent;
-  if (!intent) {
+  if (state.openRooms.length === 0) {
     state.eventState = 'idle';
     renderInspector();
     return;
   }
   state.eventState = 'connecting';
-  const source = new EventSource(`/danmaku?rooms=${encodeURIComponent(intent)}`);
-  danmakuSource = source;
-  source.onopen = () => {
-    state.eventState = 'online';
-    renderInspector();
-  };
+  state.openRooms.forEach((roomId) => {
+    if (!danmakuStates.has(roomId)) danmakuStates.set(roomId, { ok: false, text: '正在连接' });
+    updateDanmakuControl(roomId);
+  });
+  renderInspector();
+}
+
+function updateDanmakuSummary(): void {
+  const current = state.openRooms.map((roomId) => danmakuStates.get(roomId));
+  if (current.length === 0) state.eventState = 'idle';
+  else if (current.every((item) => item?.ok)) state.eventState = 'online';
+  else if (current.some((item) => item?.text.includes('重连'))) state.eventState = 'retrying';
+  else state.eventState = 'connecting';
+}
+
+function handleNativePlayerEvent(event: NativePlayerEvent): void {
+  const roomId = String(event.roomId ?? '');
+  if (!roomId) return;
+  if (event.event === 'danmaku-state') {
+    const stateName = String(event.state ?? 'connecting');
+    const endpoint = event.endpoint ? ` · ${event.endpoint}` : '';
+    const labels: Record<string, string> = {
+      online: `已连接${endpoint}`,
+      retrying: `重连中${endpoint}`,
+      connecting: `正在连接${endpoint}`,
+      offline: '未连接',
+    };
+    danmakuStates.set(roomId, { ok: stateName === 'online', text: labels[stateName] ?? '正在连接' });
+    updateDanmakuSummary();
+    updateDanmakuControl(roomId);
+    if (state.activeRoom === roomId) renderInspector();
+    return;
+  }
+  if (event.event !== 'danmaku' || (event.type !== 'chat' && event.type !== 'gift')) return;
+  const liveEvent: LiveEvent = event.type === 'gift'
+    ? {
+        type: 'gift', room: roomId, sender: event.sender,
+        giftName: event.giftId ? `礼物 ${event.giftId}` : '礼物',
+        giftCount: Number(event.giftCount ?? 1), totalValue: 0, time: event.time,
+      }
+    : { type: 'chat', room: roomId, sender: event.sender, text: event.text, col: event.color, time: event.time };
+  if (addLiveEvent(liveEvent) && state.activeRoom === roomId) renderInspector();
+}
+
+const unsubscribeNativePlayerEvents = subscribeNativePlayerEvents(handleNativePlayerEvent);
+
+function connectStatsEvents(): void {
+  if (demoMode || statsEventSource) return;
+  const source = new EventSource('/api/events');
+  statsEventSource = source;
   source.onmessage = (message) => {
     try {
       const event = JSON.parse(message.data) as LiveEvent;
+      if (event.type !== 'gift') return;
+      recordRealtimeGiftRevenue(event);
+      addLiveEvent(event);
       const roomId = String(event.room ?? event.rid ?? '');
-      if (event.type === 'status') {
-        if (roomId) {
-          danmakuStates.set(roomId, { ok: Boolean(event.ok), text: String(event.text ?? event.txt ?? '弹幕连接状态') });
-          updateDanmakuControl(roomId);
-        }
-        return;
-      }
-      events.unshift({ ...event, time: event.time ?? Date.now() });
-      if (events.length > 200) events.length = 200;
-      if (event.type === 'chat' && roomId) addDanmakuItem(roomId, event);
       if (state.activeRoom === roomId) renderInspector();
     } catch {
       // Ignore malformed third-party event payloads.
     }
-  };
-  source.onerror = () => {
-    state.eventState = 'retrying';
-    state.openRooms.forEach((roomId) => {
-      danmakuStates.set(roomId, { ok: false, text: '弹幕重连中' });
-      updateDanmakuControl(roomId);
-    });
-    renderInspector();
   };
 }
 
@@ -1515,6 +1909,7 @@ function openRoom(roomId: string): void {
   renderCanvas();
   renderInspector();
   connectDanmaku();
+  void loadSevenDayGiftRevenue([roomId]);
   document.body.classList.remove('room-drawer-open');
 }
 
@@ -1524,7 +1919,6 @@ function closeRoom(roomId: string): void {
   players.delete(roomId);
   playerStates.delete(roomId);
   danmakuStates.delete(roomId);
-  danmakuLanes.delete(roomId);
   if (state.activeRoom === roomId) state.activeRoom = state.openRooms[0] ?? null;
   savePreferences();
   renderRoomList();
@@ -1554,27 +1948,59 @@ function toggleFavorite(roomId: string): void {
 }
 
 function toggleMute(roomId: string): void {
-  if (state.mutedRooms.has(roomId)) state.mutedRooms.delete(roomId);
-  else state.mutedRooms.add(roomId);
+  if (state.mutedRooms.has(roomId)) {
+    state.openRooms.forEach((id) => {
+      if (id !== roomId) {
+        state.mutedRooms.add(id);
+        players.get(id)?.setMuted(true);
+      }
+    });
+    state.mutedRooms.delete(roomId);
+    if (roomVolume(roomId) === 0) state.roomVolumes[roomId] = 50;
+  } else {
+    state.mutedRooms.add(roomId);
+  }
+  players.get(roomId)?.setVolume(roomVolume(roomId) / 100);
   players.get(roomId)?.setMuted(state.mutedRooms.has(roomId));
   savePreferences();
   renderCanvas();
   renderInspector();
 }
 
-async function togglePlayback(roomId: string): Promise<void> {
-  const card = videoGrid.querySelector<HTMLElement>(`.stream-card[data-room="${roomId}"]`);
-  const video = card?.querySelector<HTMLVideoElement>('video');
-  if (!video || !card?.classList.contains('has-stream')) return;
-  if (video.paused) {
-    try {
-      await video.play();
-    } catch {
-      toast('当前直播流无法继续播放', 'error');
-    }
-  } else {
-    video.pause();
+function setRoomVolume(roomId: string, value: number): void {
+  if (!roomId || !Number.isFinite(value)) return;
+  const volume = Math.round(Math.min(100, Math.max(0, value)));
+  state.roomVolumes[roomId] = volume;
+  if (volume === 0) state.mutedRooms.add(roomId);
+  else {
+    state.openRooms.forEach((id) => {
+      if (id !== roomId) {
+        state.mutedRooms.add(id);
+        players.get(id)?.setMuted(true);
+      }
+    });
+    state.mutedRooms.delete(roomId);
   }
+  const player = players.get(roomId);
+  player?.setVolume(volume / 100);
+  player?.setMuted(volume === 0);
+  savePreferences();
+  updatePlaybackControls(roomId);
+
+  if (state.activeRoom === roomId) {
+    const inspectorMute = inspectorContent.querySelector<HTMLButtonElement>('[data-action="toggle-mute"]');
+    if (inspectorMute) {
+      inspectorMute.innerHTML = `<i data-lucide="${volume === 0 ? 'volume-2' : 'volume-x'}"></i><span>${volume === 0 ? '取消静音' : '静音'}</span>`;
+      drawIcons();
+    }
+  }
+}
+
+function togglePlayback(roomId: string): void {
+  const card = videoGrid.querySelector<HTMLElement>(`.stream-card[data-room="${roomId}"]`);
+  const player = players.get(roomId);
+  if (!player || !card?.classList.contains('has-stream')) return;
+  player.setPaused(!player.isPaused());
   updatePlaybackControls(roomId);
 }
 
@@ -1587,10 +2013,6 @@ function fullscreenRoom(roomId: string): void {
 function toggleDanmaku(roomId: string): void {
   if (state.danmakuHiddenRooms.has(roomId)) state.danmakuHiddenRooms.delete(roomId);
   else state.danmakuHiddenRooms.add(roomId);
-  if (state.danmakuHiddenRooms.has(roomId)) {
-    videoGrid.querySelector<HTMLElement>(`.stream-card[data-room="${roomId}"] .danmaku-layer`)?.replaceChildren();
-    danmakuLanes.delete(roomId);
-  }
   savePreferences();
   updateDanmakuControl(roomId);
 }
@@ -1610,24 +2032,55 @@ async function refreshAll(): Promise<void> {
   }
 }
 
-async function changeQuality(roomId: string, quality: Quality): Promise<void> {
+async function changeQuality(roomId: string, quality: Quality, automatic = false): Promise<void> {
   const room = roomById(roomId);
-  if (!room || room.quality === quality) return;
+  if (!room) return;
+  const runtime = runtimeFor(roomId, room.quality);
+  if (!automatic) runtime.requestedQuality = quality;
+  if (runtime.qualityPending || room.quality === quality) {
+    if (!automatic) runtime.automaticQuality = false;
+    return;
+  }
   const previous = room.quality;
+  runtime.qualityPending = true;
   room.quality = quality;
   players.get(roomId)?.expectNextUrl();
   renderCanvas();
   renderInspector();
   try {
     if (!demoMode) await setRoomQuality(roomId, quality);
-    toast(`${displayRoomName(room, roomId)} 已切换为${qualityNames[quality]}`, 'success');
+    runtime.automaticQuality = automatic && quality === 'SD';
+    if (!automatic) toast(`${displayRoomName(room, roomId)} 已切换为${qualityNames[quality]}`, 'success');
     if (!demoMode) window.setTimeout(() => void loadRooms(true), 1400);
   } catch (error) {
     room.quality = previous;
     renderCanvas();
     renderInspector();
-    toast(error instanceof Error ? error.message : '清晰度切换失败', 'error');
+    if (!automatic) toast(error instanceof Error ? error.message : '清晰度切换失败', 'error');
+  } finally {
+    runtime.qualityPending = false;
   }
+}
+
+async function applyMultiRoomQualityPolicy(): Promise<void> {
+  const openRoomIds = state.openRooms.filter((roomId) => roomById(roomId));
+  const primaryRoom = state.activeRoom ?? openRoomIds[0];
+  const shouldReduce = openRoomIds.length >= 5;
+  await Promise.all(openRoomIds.map(async (roomId) => {
+    const room = roomById(roomId);
+    if (!room) return;
+    const runtime = runtimeFor(roomId, room.quality);
+    const isSecondary = shouldReduce && roomId !== primaryRoom;
+    if (isSecondary) {
+      if (!runtime.automaticQuality) runtime.requestedQuality = room.quality;
+      if (room.quality !== 'SD' && !runtime.qualityPending) await changeQuality(roomId, 'SD', true);
+      return;
+    }
+    if (runtime.automaticQuality && room.quality !== runtime.requestedQuality && !runtime.qualityPending) {
+      await changeQuality(roomId, runtime.requestedQuality, true);
+      runtime.automaticQuality = false;
+    }
+  }));
 }
 
 function askToRemove(roomIds: string[]): void {
@@ -1858,6 +2311,12 @@ function performAction(action: string, roomId: string): void {
 
 app.addEventListener('click', (event) => {
   const target = event.target as HTMLElement;
+  const eventFeedButton = target.closest<HTMLButtonElement>('[data-event-feed]');
+  if (eventFeedButton) {
+    state.inspectorFeed = eventFeedButton.dataset.eventFeed === 'gift' ? 'gift' : 'chat';
+    renderInspector();
+    return;
+  }
   const viewButton = target.closest<HTMLButtonElement>('[data-view]');
   if (viewButton) {
     switchView(viewButton.dataset.view as AppView);
@@ -1897,6 +2356,16 @@ app.addEventListener('change', (event) => {
       ?? '';
     void changeQuality(roomId, target.value as Quality);
   }
+});
+
+app.addEventListener('input', (event) => {
+  const target = event.target as HTMLInputElement;
+  if (!target.matches('input[data-volume]')) return;
+  const roomId = target.dataset.room
+    ?? target.closest<HTMLElement>('[data-room]')?.dataset.room
+    ?? state.activeRoom
+    ?? '';
+  setRoomVolume(roomId, Number(target.value));
 });
 
 interface WindowInteraction {
@@ -2120,14 +2589,19 @@ document.addEventListener('visibilitychange', () => {
   if (!document.hidden) {
     void checkService();
     void loadRooms(true);
+    void runRoomRefreshScheduler();
   }
 });
 
 window.addEventListener('beforeunload', () => {
+  window.clearTimeout(preferencesSaveTimer);
+  savePreferences();
   streamsAbort?.abort();
   statusAbort?.abort();
   statsAbort?.abort();
-  danmakuSource?.close();
+  window.clearTimeout(roomRefreshTimer);
+  statsEventSource?.close();
+  unsubscribeNativePlayerEvents();
   players.forEach((player) => player.destroy());
 });
 
@@ -2160,6 +2634,21 @@ danmakuAreaSelect.addEventListener('change', () => {
   applyDanmakuDisplaySettings(true);
 });
 
+giftRevenueRangeSelect.addEventListener('change', () => {
+  state.giftRevenueRange = giftRevenueRangeSelect.value as GiftRevenueRange;
+  savePreferences();
+  updateGiftRevenueDisplays();
+  void loadSevenDayGiftRevenue();
+});
+
+includeFreeGiftsInput.addEventListener('change', () => {
+  state.includeFreeGifts = includeFreeGiftsInput.checked;
+  savePreferences();
+  updateGiftRevenueDisplays();
+  renderAnalytics();
+  renderInspector();
+});
+
 window.setInterval(() => {
   document.querySelectorAll<HTMLElement>('.stream-card').forEach((card) => {
     const room = roomById(card.dataset.room ?? '');
@@ -2174,15 +2663,17 @@ window.setInterval(() => {
 
 window.setInterval(() => {
   if (!document.hidden) {
-    void loadRooms(true);
     void checkService();
-    if (state.view === 'analytics') void loadAnalytics(true);
+    void loadAnalytics(true);
   }
-}, 5000);
+}, 8000);
 
 applyDanmakuDisplaySettings();
 drawIcons();
 applyPanelVisibility();
 renderAll();
 void loadRooms();
+void runRoomRefreshScheduler();
 void checkService();
+void loadAnalytics(true);
+connectStatsEvents();

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, shell } = require('electron');
+const { app, BrowserWindow, Menu, shell, ipcMain } = require('electron');
 const { execFile, spawn } = require('node:child_process');
 const fs = require('node:fs');
 const http = require('node:http');
@@ -35,10 +35,153 @@ const mimeTypes = {
 };
 
 let backendProcess = null;
+let nativePlayerProcess = null;
+let nativePlayerReady = false;
+let nativePlayerBuffer = '';
+const nativePlayerQueue = [];
 let localServer = null;
 let localOrigin = '';
 let logPath = '';
 let mainWindow = null;
+
+function preferencesPath() {
+  return path.join(app.getPath('userData'), 'preferences.json');
+}
+
+function readPreferences() {
+  try {
+    const value = JSON.parse(fs.readFileSync(preferencesPath(), 'utf8'));
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function writePreferences(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+  const serialized = JSON.stringify(value);
+  if (serialized.length > 1024 * 1024) return;
+  const target = preferencesPath();
+  const temporary = `${target}.tmp`;
+  try {
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(temporary, serialized, 'utf8');
+    fs.copyFileSync(temporary, target);
+    fs.rmSync(temporary, { force: true });
+  } catch (error) {
+    log(`preferences write failed: ${error.message}`);
+    try {
+      fs.rmSync(temporary, { force: true });
+    } catch {
+      // Cleanup failure is non-fatal.
+    }
+  }
+}
+
+ipcMain.on('livegrid:preferences:read', (event) => {
+  event.returnValue = event.sender === mainWindow?.webContents ? readPreferences() : null;
+});
+
+ipcMain.on('livegrid:preferences:write', (event, value) => {
+  if (event.sender === mainWindow?.webContents) writePreferences(value);
+});
+
+function validNativeCommand(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  try {
+    const serialized = JSON.stringify(value);
+    return value.op === 'shutdown'
+      || (serialized.length <= 64 * 1024 && /^[0-9]{1,20}$/.test(String(value.roomId || '')));
+  } catch {
+    return false;
+  }
+}
+
+function writeNativeCommand(value) {
+  if (!nativePlayerProcess || nativePlayerProcess.killed || !nativePlayerProcess.stdin.writable) return;
+  if (!nativePlayerReady) {
+    if (nativePlayerQueue.length < 500) nativePlayerQueue.push(value);
+    return;
+  }
+  nativePlayerProcess.stdin.write(`${JSON.stringify(value)}\n`);
+}
+
+ipcMain.on('livegrid:native-player:command', (event, value) => {
+  if (event.sender !== mainWindow?.webContents || !validNativeCommand(value)) return;
+  writeNativeCommand(value);
+});
+
+function sendNativeEvent(value) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send('livegrid:native-player:event', value);
+}
+
+function consumeNativeOutput(chunk) {
+  nativePlayerBuffer += chunk;
+  if (nativePlayerBuffer.length > 1024 * 1024) nativePlayerBuffer = '';
+  const lines = nativePlayerBuffer.split(/\r?\n/);
+  nativePlayerBuffer = lines.pop() || '';
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    try {
+      const value = JSON.parse(line);
+      if (value.event === 'ready') {
+        nativePlayerReady = true;
+        log('native player ready');
+        while (nativePlayerQueue.length > 0) writeNativeCommand(nativePlayerQueue.shift());
+      }
+      if (value.event === 'host-error') log(`native player error: ${value.detail || 'unknown error'}`);
+      if (value.event === 'player-state' && (value.state === 'stalled' || value.state === 'error')) {
+        log(`native player room ${value.roomId || '?'} ${value.state}: ${value.detail || 'no detail'}`);
+      }
+      sendNativeEvent(value);
+    } catch (error) {
+      log(`native player emitted invalid data: ${error.message}`);
+    }
+  }
+}
+
+function nativeWindowHandle(window) {
+  const buffer = window.getNativeWindowHandle();
+  return process.arch === 'x64' ? buffer.readBigUInt64LE(0).toString() : String(buffer.readUInt32LE(0));
+}
+
+function startNativePlayer(window) {
+  const runtimeDir = app.isPackaged
+    ? path.join(process.resourcesPath, 'native-player')
+    : path.resolve(__dirname, '..', 'native-player', 'runtime');
+  const executable = path.join(runtimeDir, 'LiveGrid.PlayerHost.exe');
+  if (!fs.existsSync(executable) || !fs.existsSync(path.join(runtimeDir, 'libmpv-2.dll'))) {
+    log(`native player runtime missing: ${runtimeDir}`);
+    sendNativeEvent({ event: 'host-error', detail: 'libmpv 播放组件不完整' });
+    return;
+  }
+
+  nativePlayerReady = false;
+  nativePlayerBuffer = '';
+  nativePlayerQueue.length = 0;
+  nativePlayerProcess = spawn(executable, [nativeWindowHandle(window)], {
+    cwd: runtimeDir,
+    detached: false,
+    windowsHide: true,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  nativePlayerProcess.stdout.setEncoding('utf8');
+  nativePlayerProcess.stderr.setEncoding('utf8');
+  nativePlayerProcess.stdout.on('data', consumeNativeOutput);
+  nativePlayerProcess.stderr.on('data', (chunk) => log(`native player: ${String(chunk).trim()}`));
+  nativePlayerProcess.stdin.on('error', (error) => log(`native player input failed: ${error.message}`));
+  nativePlayerProcess.once('error', (error) => {
+    log(`native player start failed: ${error.message}`);
+    sendNativeEvent({ event: 'host-error', detail: 'libmpv 播放组件启动失败' });
+  });
+  nativePlayerProcess.once('exit', (code) => {
+    log(`native player exited with code ${code}`);
+    nativePlayerProcess = null;
+    nativePlayerReady = false;
+    sendNativeEvent({ event: 'host-error', detail: 'libmpv 播放组件已退出' });
+  });
+}
 
 function log(message) {
   if (!logPath) return;
@@ -293,9 +436,11 @@ function createWindow() {
       nodeIntegration: false,
       sandbox: true,
       devTools: !app.isPackaged,
+      preload: path.join(__dirname, 'preload.cjs'),
     },
   });
   mainWindow = window;
+  startNativePlayer(window);
 
   const revealWindow = (reason) => {
     if (smokeTest || window.isDestroyed() || window.isVisible()) return;
@@ -359,6 +504,19 @@ function stopOwnedBackend() {
   }
 }
 
+function stopNativePlayer() {
+  if (!nativePlayerProcess || nativePlayerProcess.killed) return;
+  try {
+    nativePlayerProcess.stdin.write(`${JSON.stringify({ op: 'shutdown' })}\n`);
+    nativePlayerProcess.stdin.end();
+  } catch {
+    nativePlayerProcess.kill();
+  }
+  nativePlayerProcess = null;
+  nativePlayerReady = false;
+  nativePlayerQueue.length = 0;
+}
+
 const hasLock = app.requestSingleInstanceLock();
 if (!hasLock) {
   app.quit();
@@ -386,6 +544,7 @@ if (!hasLock) {
 
   app.on('window-all-closed', () => app.quit());
   app.on('before-quit', () => {
+    stopNativePlayer();
     stopOwnedBackend();
     localServer?.close();
   });

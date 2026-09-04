@@ -8,7 +8,7 @@ Web interface for an Electron desktop shell.
 
 ## Stack
 
-TypeScript, Vite, Electron, HLS.js, and mpegts.js backed by a local packaged HTTP service. The interface remains buildable as static files for development and is packaged as a Windows desktop application for distribution.
+TypeScript, Vite, Electron, a per-room native C# host, and libmpv backed by a local packaged HTTP service. The interface remains buildable as static files for development and is packaged as a Windows desktop application for distribution.
 
 ## Users
 
@@ -28,8 +28,8 @@ Primarily desktop use at 1280x800 and larger, with responsive support for narrow
 
 ## Capabilities and Constraints
 
-- Preserve `/streams.json`, `/status`, `/add`, `/remove`, `/refresh`, `/quality`, `/danmaku`, `/api/stats`, and `/api/events` contracts.
-- Preserve HLS and HTTP-FLV playback compatibility.
+- Preserve `/streams.json`, `/status`, `/add`, `/remove`, `/refresh`, `/quality`, `/api/stats`, and `/api/events` contracts.
+- Preserve HLS and HTTP-FLV playback compatibility through libmpv.
 - Treat the supplied C# shell and Python service as compiled artifacts; this source replaces the web UI and documents the integration boundary.
 - Remove original visible product attribution, account tier copy, unrelated websites, and unsolicited remote chat.
 - Preserve third-party license notices required by dependencies.

@@ -1,5 +1,6 @@
 import type {
   Quality,
+  RoomTrendResponse,
   ServiceStatus,
   StatsResponse,
   StreamResponse,
@@ -7,6 +8,30 @@ import type {
 } from './types';
 
 let lastLatency = 0;
+
+class TaskQueue {
+  private active = 0;
+  private readonly pending: Array<() => void> = [];
+
+  constructor(private readonly concurrency: number) {}
+
+  run<T>(task: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const start = () => {
+        this.active += 1;
+        void task().then(resolve, reject).finally(() => {
+          this.active -= 1;
+          this.pending.shift()?.();
+        });
+      };
+      if (this.active < this.concurrency) start();
+      else this.pending.push(start);
+    });
+  }
+}
+
+// Adding, refreshing, and changing quality all make the backend resolve a stream URL.
+const streamResolveQueue = new TaskQueue(2);
 
 function withCacheBust(path: string): string {
   const separator = path.includes('?') ? '&' : '?';
@@ -61,8 +86,12 @@ export function getStats(signal?: AbortSignal): Promise<StatsResponse> {
   return request<StatsResponse>('/api/stats', signal);
 }
 
+export function getRoomTrend(room: string, signal?: AbortSignal): Promise<RoomTrendResponse> {
+  return request<RoomTrendResponse>(`/api/room/${encodeURIComponent(room)}/trend`, signal);
+}
+
 export async function addRoom(room: string): Promise<void> {
-  await requestWithoutBody(`/add?room=${encodeURIComponent(room)}`);
+  await streamResolveQueue.run(() => requestWithoutBody(`/add?room=${encodeURIComponent(room)}`));
 }
 
 export async function removeRoom(room: string): Promise<void> {
@@ -70,13 +99,13 @@ export async function removeRoom(room: string): Promise<void> {
 }
 
 export async function refreshStreams(): Promise<void> {
-  await requestWithoutBody('/refresh');
+  await streamResolveQueue.run(() => requestWithoutBody('/refresh'));
 }
 
 export async function setRoomQuality(room: string, quality: Quality): Promise<void> {
-  const result = await request<{ ok?: boolean }>(
+  const result = await streamResolveQueue.run(() => request<{ ok?: boolean }>(
     `/quality?room=${encodeURIComponent(room)}&q=${encodeURIComponent(quality)}`,
-  );
+  ));
   if (result.ok === false) {
     throw new Error('本地服务未接受清晰度设置');
   }

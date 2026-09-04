@@ -1,7 +1,11 @@
 node_modules/
 dist/
 release/
+native-player/*.7z
+native-player/runtime/LiveGrid.PlayerHost.exe
+native-player/runtime/libmpv-2.dll
 .desktop-smoke*/
+diagnostics/
 .impeccable/
 *.log
 *.tmp

@@ -6,9 +6,9 @@ LiveGrid 是一套本地直播监控工作台，中文产品名为“监控室�
 
 ## 下载
 
-- 当前版本：`0.1.4`
-- [下载 LiveGrid 0.1.4 Windows x64 安装包](https://github.com/Bixers/LiveGrid/releases/download/v0.1.4/LiveGrid-0.1.4-setup.exe)
-- SHA-256：`EEF7BE14AA83CD917CD78BEECA1D007BA99BB9C92E759AA78E3E2FE4124CED96`
+- 当前公开版本：`0.1.8`
+- [下载 LiveGrid 0.1.8 Windows x64 安装包](https://github.com/Bixers/LiveGrid/releases/download/v0.1.8/LiveGrid-0.1.8-setup.exe)
+- SHA-256：`A5289EA2795E7AEA31B3AE8BC63D7A8E482411354789E13BA2B1DA2F3524CB6C`
 
 安装包暂未配置代码签名证书，Windows 可能显示“未知发布者”。
 
@@ -45,7 +45,7 @@ pnpm build
 pnpm desktop:pack
 ```
 
-成品输出到 `release/LiveGrid-0.1.4-setup.exe`。默认安装到 `%LOCALAPPDATA%\Programs\监控室`；选择其他父目录时，安装器会自动补上独立的 `监控室` 子目录。安装器将文件直接释放到目标目录，不再先把大型 `app-64.7z` 写入系统临时目录。安装后直接运行 `LiveGrid.exe`，不再像单文件便携版一样每次解压约 455 MB 的 Electron 运行时。
+当前源码成品输出到 `release/LiveGrid-0.1.8-setup.exe`。默认安装到 `%LOCALAPPDATA%\Programs\监控室`；选择其他父目录时，安装器会自动补上独立的 `监控室` 子目录。安装器将文件直接释放到目标目录，不再先把大型 `app-64.7z` 写入系统临时目录。安装后直接运行 `LiveGrid.exe`，不再像单文件便携版一样每次解压 Electron 运行时。
 
 仍需便携单文件时可执行 `pnpm desktop:pack:portable`，但未签名环境下每次启动都可能因临时解压和安全扫描出现较长等待。
 
@@ -60,12 +60,16 @@ pnpm desktop:pack
 - 直播监控与运行数据双视图，桌面三栏上下文和窄屏抽屉布局。
 - 房间搜索、状态筛选、关注优先、多选和批量打开/静音/移除。
 - 自由窗口开关，以及自动、1/2/3/4 列和重点画面布局；自由模式支持拖动、八向缩放和键盘调整。
-- 清晰度切换、紧凑播放控制、单路/全部静音、手动刷新、双击视频全屏。
-- 弹幕可逐路开关，并可统一调整透明度、字号和顶部/底部显示区域。
-- 本地保存已打开房间、关注、静音和布局偏好。
+- 每个房间使用独立 libmpv 播放器、弹幕连接和运行状态，视频同步到音频时钟并独立恢复断流。
+- 取流操作最多 2 个并发；房间刷新随机错峰并在失败时指数退避，五路以上自动尝试将非主画面降为标清。
+- 清晰度切换、逐房间音量、单房间音频焦点、紧凑播放控制、手动刷新和双击视频全屏。
+- 弹幕可逐路开关，并可统一调整透明度、字号和顶部/底部显示区域；连接在 `8501` 至 `8506` 间轮换并带握手超时、心跳与退避重试。
+- 直播顶栏显示 CNY 礼物收入，收入统计可切换当日、近 7 日和本次直播。
+- 房间检查器使用独立的弹幕栏与礼物栏，礼物统计可选择是否包含免费礼物。
+- 在固定用户目录保存已打开房间、关注、音量、静音和布局偏好，不受桌面本地服务随机端口影响。
 - 本地服务健康、请求延迟、空状态、失败状态和恢复反馈。
-- 弹幕 SSE 事件检查器与 `/api/stats` 运行数据表。
-- 命令面板与键盘操作；HLS/FLV 播放器按流格式懒加载。
+- 原生实时弹幕、礼物事件检查器与 `/api/stats` 运行数据表。
+- 命令面板与键盘操作；HLS/HTTP-FLV 均交给 libmpv 解析。
 
 ## 本地接口
 
@@ -77,8 +81,8 @@ pnpm desktop:pack
 - `GET /remove?room=<id>`
 - `GET /refresh`
 - `GET /quality?room=<id>&q=<OD|UHD|HD|SD>`
-- `GET /danmaku?rooms=<id,id>`
 - `GET /api/stats`
+- `GET /api/room/<id>/trend`
 - `GET /api/events`
 
 ## 集成边界

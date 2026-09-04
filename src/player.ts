@@ -1,270 +1,232 @@
 export type PlayerState = 'idle' | 'loading' | 'playing' | 'stalled' | 'error';
 type PlayerStateHandler = (state: PlayerState, detail?: string) => void;
 
-interface HlsEngine {
-  attachMedia(video: HTMLMediaElement): void;
-  destroy(): void;
-  loadSource(url: string): void;
-  on(event: string, callback: (_event: string, data: { details?: string; fatal?: boolean }) => void): void;
+export interface NativePlayerEvent {
+  event?: string;
+  roomId?: string;
+  state?: string;
+  detail?: string;
+  type?: string;
+  text?: string;
+  sender?: string;
+  color?: string;
+  giftId?: string;
+  giftCount?: string | number;
+  time?: number;
+  endpoint?: number;
 }
 
-interface FlvEngine {
-  attachMediaElement(video: HTMLMediaElement): void;
-  destroy(): void;
-  detachMediaElement(): void;
-  load(): void;
-  on(event: string, callback: (type: string, detail: string) => void): void;
-  play(): Promise<void> | void;
-  unload(): void;
+interface NativePlayerBridge {
+  command(value: Record<string, unknown>): void;
+  onEvent(callback: (value: NativePlayerEvent) => void): () => void;
+}
+
+declare global {
+  interface Window {
+    liveGridNativePlayer?: NativePlayerBridge;
+  }
+}
+
+const bridge = window.liveGridNativePlayer;
+const eventListeners = new Set<(event: NativePlayerEvent) => void>();
+const roomPlayers = new Map<string, StreamPlayer>();
+
+function streamIdentity(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+  } catch {
+    return url.split('?', 1)[0] ?? url;
+  }
+}
+
+bridge?.onEvent((event) => {
+  const roomId = String(event.roomId ?? '');
+  if (event.event === 'player-state' && roomId) {
+    roomPlayers.get(roomId)?.receiveState(event);
+  } else if (event.event === 'host-error') {
+    roomPlayers.forEach((player) => player.receiveHostError(event.detail ?? 'libmpv 播放组件不可用'));
+  }
+  eventListeners.forEach((listener) => listener(event));
+});
+
+export function subscribeNativePlayerEvents(listener: (event: NativePlayerEvent) => void): () => void {
+  eventListeners.add(listener);
+  return () => eventListeners.delete(listener);
+}
+
+function send(value: Record<string, unknown>): void {
+  bridge?.command(value);
 }
 
 export class StreamPlayer {
-  private hls: HlsEngine | null = null;
-  private flv: FlvEngine | null = null;
   private currentUrl = '';
-  private pendingUrl = '';
   private forceNextChange = false;
-  private generation = 0;
-  private stallTimer: number | null = null;
-  private lastTime = 0;
-  private stalledTicks = 0;
-  private readonly listeners: Array<[keyof HTMLMediaElementEventMap, EventListener]> = [];
+  private paused = false;
+  private muted = true;
+  private volume = 1;
+  private surfaceVisible = false;
+  private destroyed = false;
+  private nativeState: PlayerState = 'idle';
+  private boundsFrame: number | null = null;
+  private lastBounds = '';
+  private readonly resizeObserver: ResizeObserver;
+  private readonly syncBoundListener = () => this.scheduleBounds();
 
   constructor(
-    private readonly video: HTMLVideoElement,
+    private readonly roomId: string,
+    private readonly surface: HTMLElement,
     private readonly onState: PlayerStateHandler,
   ) {
-    this.bind('loadstart', () => this.onState('loading'));
-    this.bind('playing', () => {
-      this.stalledTicks = 0;
-      this.onState('playing');
-    });
-    this.bind('waiting', () => this.onState('stalled', '正在等待数据'));
-    this.bind('stalled', () => this.onState('stalled', '数据暂时中断'));
-    this.bind('error', () => this.handlePlaybackFailure(this.mediaErrorText()));
-    this.bind('ended', () => this.handlePlaybackFailure('直播流已结束'));
+    roomPlayers.set(roomId, this);
+    surface.dataset.playerEngine = 'libmpv';
+    this.resizeObserver = new ResizeObserver(() => this.scheduleBounds());
+    this.resizeObserver.observe(surface);
+    window.addEventListener('resize', this.syncBoundListener);
+    window.addEventListener('scroll', this.syncBoundListener, true);
+    send({ op: 'create', roomId });
+    this.scheduleBounds();
   }
 
   load(url: string): void {
+    if (this.destroyed) return;
     if (!url) {
       this.unload();
       this.onState('idle');
       return;
     }
-    if (url === this.currentUrl && !this.video.error) return;
-
-    if (this.forceNextChange && url !== this.currentUrl) {
-      this.forceNextChange = false;
-      this.switchTo(url);
-      return;
-    }
-
-    if (this.currentUrl && this.isHealthy()) {
-      this.pendingUrl = url;
-      this.startStallWatch();
-      return;
-    }
-
-    this.switchTo(url);
+    const sameStream = this.currentUrl && streamIdentity(url) === streamIdentity(this.currentUrl);
+    const recoveringWithFreshUrl = (this.nativeState === 'stalled' || this.nativeState === 'error')
+      && url !== this.currentUrl;
+    if (sameStream && !recoveringWithFreshUrl && !this.forceNextChange) return;
+    this.currentUrl = url;
+    this.forceNextChange = false;
+    this.paused = false;
+    this.onState('loading');
+    send({ op: 'load', roomId: this.roomId, url });
   }
 
   expectNextUrl(): void {
     this.forceNextChange = true;
   }
 
-  private switchTo(url: string): void {
-    this.stopStallWatch();
+  setPaused(paused: boolean): void {
+    if (this.destroyed || !this.currentUrl) return;
+    this.paused = paused;
+    send({ op: 'pause', roomId: this.roomId, value: paused });
+  }
 
-    const generation = ++this.generation;
-    this.destroyEngine();
-    this.video.pause();
-    this.video.removeAttribute('src');
-    this.video.load();
-    this.currentUrl = url;
-    this.pendingUrl = '';
-    this.onState('loading');
-
-    if (/\.m3u8(?:$|\?)/i.test(url)) {
-      if (this.video.canPlayType('application/vnd.apple.mpegurl')) {
-        this.video.src = url;
-        void this.video.play().catch(() => undefined);
-        return;
-      }
-      void this.loadHls(url, generation);
-      return;
-    }
-
-    if (/\.flv(?:$|\?)/i.test(url)) {
-      void this.loadFlv(url, generation);
-      return;
-    }
-
-    this.video.src = url;
-    void this.video.play().catch(() => undefined);
+  isPaused(): boolean {
+    return this.paused;
   }
 
   setMuted(muted: boolean): void {
-    this.video.muted = muted;
+    if (this.destroyed) return;
+    this.muted = muted;
+    send({ op: 'mute', roomId: this.roomId, value: muted });
+  }
+
+  isMuted(): boolean {
+    return this.muted;
+  }
+
+  setVolume(volume: number): void {
+    if (this.destroyed) return;
+    this.volume = Math.min(1, Math.max(0, volume));
+    send({ op: 'volume', roomId: this.roomId, value: Math.round(this.volume * 100) });
+  }
+
+  setSurfaceVisible(visible: boolean): void {
+    if (this.surfaceVisible === visible) return;
+    this.surfaceVisible = visible;
+    this.scheduleBounds();
+  }
+
+  setDanmakuVisible(visible: boolean): void {
+    if (!this.destroyed) send({ op: 'danmaku-visible', roomId: this.roomId, value: visible });
+  }
+
+  setDanmakuSettings(opacity: number, fontSize: number, area: string): void {
+    if (!this.destroyed) {
+      send({ op: 'danmaku-settings', roomId: this.roomId, opacity, fontSize, area });
+    }
+  }
+
+  bringToFront(): void {
+    if (!this.destroyed) send({ op: 'front', roomId: this.roomId });
   }
 
   unload(): void {
-    if (!this.currentUrl && !this.pendingUrl && !this.hls && !this.flv && !this.video.getAttribute('src')) {
-      this.onState('idle');
-      return;
-    }
-    this.generation += 1;
-    this.stopStallWatch();
-    this.destroyEngine();
+    if (this.destroyed || (!this.currentUrl && !this.forceNextChange)) return;
     this.currentUrl = '';
-    this.pendingUrl = '';
+    this.nativeState = 'idle';
     this.forceNextChange = false;
-    this.video.pause();
-    this.video.removeAttribute('src');
-    this.video.load();
+    this.paused = false;
+    this.surfaceVisible = false;
+    send({ op: 'unload', roomId: this.roomId });
+    this.scheduleBounds();
   }
 
   destroy(): void {
-    this.unload();
-    this.listeners.forEach(([event, listener]) => this.video.removeEventListener(event, listener));
-    this.listeners.length = 0;
+    if (this.destroyed) return;
+    this.destroyed = true;
+    this.currentUrl = '';
+    this.surfaceVisible = false;
+    this.resizeObserver.disconnect();
+    window.removeEventListener('resize', this.syncBoundListener);
+    window.removeEventListener('scroll', this.syncBoundListener, true);
+    if (this.boundsFrame !== null) cancelAnimationFrame(this.boundsFrame);
+    this.boundsFrame = null;
+    roomPlayers.delete(this.roomId);
+    send({ op: 'destroy', roomId: this.roomId });
   }
 
-  private bind(event: keyof HTMLMediaElementEventMap, handler: EventListener): void {
-    this.video.addEventListener(event, handler);
-    this.listeners.push([event, handler]);
+  receiveState(event: NativePlayerEvent): void {
+    if (this.destroyed) return;
+    const state = event.state;
+    if (state !== 'idle' && state !== 'loading' && state !== 'playing'
+      && state !== 'stalled' && state !== 'error') return;
+    this.nativeState = state;
+    if (state === 'playing') this.paused = false;
+    this.onState(state, event.detail ?? '');
   }
 
-  private async loadHls(url: string, generation: number): Promise<void> {
-    const { default: Hls } = await import('hls.js');
-    if (!this.isCurrent(url, generation)) return;
-    if (!Hls.isSupported()) {
-      this.onState('error', '当前环境不支持 HLS 播放');
-      return;
-    }
+  receiveHostError(detail: string): void {
+    if (!this.destroyed && this.currentUrl) this.onState('error', detail);
+  }
 
-    this.hls = new Hls();
-    this.hls.on(Hls.Events.ERROR, (_event, data) => {
-      if (data.fatal && this.isCurrent(url, generation)) {
-        this.handlePlaybackFailure(data.details || 'HLS 播放失败');
-      }
+  private scheduleBounds(): void {
+    if (this.destroyed || this.boundsFrame !== null) return;
+    this.boundsFrame = requestAnimationFrame(() => {
+      this.boundsFrame = null;
+      this.syncBounds();
     });
-    this.hls.on(Hls.Events.MANIFEST_PARSED, () => {
-      if (this.isCurrent(url, generation)) void this.video.play().catch(() => undefined);
-    });
-    this.hls.loadSource(url);
-    this.hls.attachMedia(this.video);
   }
 
-  private async loadFlv(url: string, generation: number): Promise<void> {
-    const { default: mpegts } = await import('mpegts.js');
-    if (!this.isCurrent(url, generation)) return;
-    if (!mpegts.isSupported()) {
-      this.onState('error', '当前环境不支持 FLV 播放');
-      return;
-    }
-
-    this.flv = mpegts.createPlayer(
-      { type: 'flv', url, isLive: true },
-    );
-    this.flv.on(mpegts.Events.ERROR, (_type, detail) => {
-      if (this.isCurrent(url, generation)) {
-        this.handlePlaybackFailure(String(detail || 'FLV 播放失败'));
-      }
-    });
-    this.flv.attachMediaElement(this.video);
-    this.flv.load();
-    void Promise.resolve(this.flv.play()).catch(() => undefined);
-  }
-
-  private isCurrent(url: string, generation: number): boolean {
-    return this.currentUrl === url && this.generation === generation;
-  }
-
-  private isHealthy(): boolean {
-    return Boolean(
-      this.currentUrl
-      && !this.video.error
-      && !this.video.ended
-      && !this.video.paused
-      && this.video.currentTime > 0
-      && this.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA,
-    );
-  }
-
-  private handlePlaybackFailure(detail: string): void {
-    if (!this.currentUrl) return;
-    if (this.pendingUrl && this.pendingUrl !== this.currentUrl) {
-      this.switchTo(this.pendingUrl);
-      return;
-    }
-    this.onState('error', detail);
-  }
-
-  private startStallWatch(): void {
-    if (this.stallTimer !== null || !this.pendingUrl) return;
-    this.lastTime = this.video.currentTime;
-    this.stalledTicks = 0;
-    this.stallTimer = window.setInterval(() => {
-      if (!this.pendingUrl) {
-        this.stopStallWatch();
-        return;
-      }
-      if (document.hidden) {
-        this.lastTime = this.video.currentTime;
-        this.stalledTicks = 0;
-        return;
-      }
-      if (this.video.error || this.video.ended) {
-        this.switchTo(this.pendingUrl);
-        return;
-      }
-      if (this.video.paused || this.video.seeking) {
-        this.lastTime = this.video.currentTime;
-        this.stalledTicks = 0;
-        return;
-      }
-      if (this.video.currentTime === this.lastTime) this.stalledTicks += 1;
-      else this.stalledTicks = 0;
-      this.lastTime = this.video.currentTime;
-      if (this.stalledTicks >= 6) this.switchTo(this.pendingUrl);
-    }, 2000);
-  }
-
-  private stopStallWatch(): void {
-    if (this.stallTimer !== null) window.clearInterval(this.stallTimer);
-    this.stallTimer = null;
-    this.stalledTicks = 0;
-  }
-
-  private destroyEngine(): void {
-    if (this.hls) {
-      this.hls.destroy();
-      this.hls = null;
-    }
-    if (this.flv) {
-      try {
-        this.flv.unload();
-        this.flv.detachMediaElement();
-        this.flv.destroy();
-      } catch {
-        // The engine may already be detached after a media error.
-      }
-      this.flv = null;
-    }
-  }
-
-  private mediaErrorText(): string {
-    switch (this.video.error?.code) {
-      case 1:
-        return '播放已中止';
-      case 2:
-        return '直播流网络错误';
-      case 3:
-        return '直播流解码失败';
-      case 4:
-        return '直播流格式不受支持';
-      default:
-        return '播放器发生错误';
-    }
+  private syncBounds(): void {
+    if (this.destroyed) return;
+    const rect = this.surface.getBoundingClientRect();
+    const scale = window.devicePixelRatio || 1;
+    const visible = this.surfaceVisible
+      && this.surface.isConnected
+      && rect.width > 1
+      && rect.height > 1
+      && rect.right > 0
+      && rect.bottom > 0
+      && rect.left < window.innerWidth
+      && rect.top < window.innerHeight;
+    const bounds = {
+      op: 'bounds',
+      roomId: this.roomId,
+      x: Math.round(rect.left * scale),
+      y: Math.round(rect.top * scale),
+      width: Math.round(rect.width * scale),
+      height: Math.round(rect.height * scale),
+      visible,
+    };
+    const serialized = JSON.stringify(bounds);
+    if (serialized === this.lastBounds) return;
+    this.lastBounds = serialized;
+    send(bounds);
   }
 }
